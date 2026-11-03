@@ -1,0 +1,6 @@
+{
+  "name": "Apis: Microcosm — 3D Bee Colony Simulator",
+  "description": "A real-time 3D simulation game controlling different bee hive inhabitants in a macro Pikmin-scale world with WebAssembly physics, dynamic weather, and honeycomb building.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
