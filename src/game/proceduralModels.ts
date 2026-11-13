@@ -4,7 +4,27 @@
  */
 
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { BeeRole, CellType, BroodStage, FlowerType } from '../types/game';
+import { detectSoftwareWebGL, terrainHeightAt } from './terrain';
+
+import dandelionPetalImg from '../assets/images/dandelion_petal_macro_1793556696638.jpg';
+import poppyPetalImg from '../assets/images/poppy_petal_macro_1793556825161.jpg';
+import bluebellPetalImg from '../assets/images/bluebell_petal_macro_1793556698114.jpg';
+import thistleFloretImg from '../assets/images/thistle_floret_macro_1793556698038.jpg';
+import plantStemImg from '../assets/images/plant_stem_macro_1793556698094.jpg';
+import mossCarpetImg from '../assets/images/moss_carpet_macro_1793556698914.jpg';
+import bracketFungusImg from '../assets/images/bracket_fungus_macro_1793556699656.jpg';
+import mantisChitinImg from '../assets/images/mantis_chitin_macro_1793556699664.jpg';
+import beeChitinImg from '../assets/images/bee_chitin_macro_1793462761277.jpg';
+import waspChitinImg from '../assets/images/wasp_chitin_macro_1793462777912.jpg';
+import botanicalLeafImg from '../assets/images/botanical_leaf_macro_1793462790946.jpg';
+import grassBladeImg from '../assets/images/grass_blade_macro_1793462745561.jpg';
+import oakBarkImg from '../assets/images/oak_bark_macro_1793461527415.jpg';
+import forestSoilImg from '../assets/images/forest_soil_macro_1793461527125.jpg';
+import pineNeedlesBranchImg from '../assets/images/pine_needles_branch_macro_1793559715728.jpg';
+import woodlandPanoramaImg from '../assets/images/woodland_forest_panorama_1793560173704.jpg';
+import meadowTurfImg from '../assets/images/meadow_turf_macro_1793560187403.jpg';
 
 // ----------------------------------------------------
 // PHOTOREALISTIC MACRO TEXTURE CACHE
@@ -14,25 +34,23 @@ const textureLoader = new THREE.TextureLoader();
 const cachedTextures: Record<string, THREE.Texture> = {};
 
 export const MACRO_TEXTURES = {
-  DANDELION: '/src/assets/images/dandelion_petal_macro_1793556696638.jpg',
-  POPPY: '/src/assets/images/poppy_petal_macro_1793556825161.jpg',
-  BLUEBELL: '/src/assets/images/bluebell_petal_macro_1793556698114.jpg',
-  THISTLE: '/src/assets/images/thistle_floret_macro_1793556698038.jpg',
-  STEM: '/src/assets/images/plant_stem_macro_1793556698094.jpg',
-  MOSS: '/src/assets/images/moss_carpet_macro_1793556698914.jpg',
-  BRACKET_FUNGUS: '/src/assets/images/bracket_fungus_macro_1793556699656.jpg',
-  MANTIS_CHITIN: '/src/assets/images/mantis_chitin_macro_1793556699664.jpg',
-  BEE_CHITIN: '/src/assets/images/bee_chitin_macro_1793462761277.jpg',
-  WASP_CHITIN: '/src/assets/images/wasp_chitin_macro_1793462777912.jpg',
-  BOTANICAL_LEAF: '/src/assets/images/botanical_leaf_macro_1793462790946.jpg',
-  GRASS_BLADE: '/src/assets/images/grass_blade_macro_1793462745561.jpg',
-  OAK_BARK: '/src/assets/images/oak_bark_macro_1793461527415.jpg',
-  SOIL: '/src/assets/images/forest_soil_macro_1793461527125.jpg',
-  OAK_LEAF_SPRAY: '/src/assets/images/oak_leaves_branch_macro_1793559703701.jpg',
-  PINE_NEEDLE_SPRAY: '/src/assets/images/pine_needles_branch_macro_1793559715728.jpg',
-  BIRCH_LEAF_SPRAY: '/src/assets/images/birch_leaves_branch_macro_1793559728022.jpg',
-  FOREST_PANORAMA: '/src/assets/images/woodland_forest_panorama_1793560173704.jpg',
-  MEADOW_TURF: '/src/assets/images/meadow_turf_macro_1793560187403.jpg',
+  DANDELION: dandelionPetalImg,
+  POPPY: poppyPetalImg,
+  BLUEBELL: bluebellPetalImg,
+  THISTLE: thistleFloretImg,
+  STEM: plantStemImg,
+  MOSS: mossCarpetImg,
+  BRACKET_FUNGUS: bracketFungusImg,
+  MANTIS_CHITIN: mantisChitinImg,
+  BEE_CHITIN: beeChitinImg,
+  WASP_CHITIN: waspChitinImg,
+  BOTANICAL_LEAF: botanicalLeafImg,
+  GRASS_BLADE: grassBladeImg,
+  OAK_BARK: oakBarkImg,
+  SOIL: forestSoilImg,
+  PINE_NEEDLE_SPRAY: pineNeedlesBranchImg,
+  FOREST_PANORAMA: woodlandPanoramaImg,
+  MEADOW_TURF: meadowTurfImg,
 };
 
 export function getMacroTexture(path: string, repeatX = 1, repeatY = 1): THREE.Texture {
@@ -48,55 +66,26 @@ export function getMacroTexture(path: string, repeatX = 1, repeatY = 1): THREE.T
   return cachedTextures[key];
 }
 
-const cachedCutoutTextures: Record<string, THREE.CanvasTexture> = {};
-
-export function getCutoutLeafTexture(path: string, threshold = 22, repeatX = 1, repeatY = 1): THREE.CanvasTexture {
-  const key = `cutout_${path}_${threshold}_${repeatX}_${repeatY}`;
-  if (cachedCutoutTextures[key]) {
-    return cachedCutoutTextures[key];
+function bakeGeometryWithMatrix(
+  src: THREE.BufferGeometry,
+  matrix: THREE.Matrix4
+): THREE.BufferGeometry {
+  const geo = src.index ? src.toNonIndexed() : src.clone();
+  geo.applyMatrix4(matrix);
+  if (!geo.attributes.normal) {
+    geo.computeVertexNormals();
   }
-
-  const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
-  const ctx = canvas.getContext('2d')!;
-
-  ctx.fillStyle = '#166534';
-  ctx.fillRect(0, 0, 512, 512);
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
-  texture.repeat.set(repeatX, repeatY);
-  cachedCutoutTextures[key] = texture;
-
-  const img = new Image();
-  img.crossOrigin = 'anonymous';
-  img.onload = () => {
-    canvas.width = img.width;
-    canvas.height = img.height;
-    ctx.drawImage(img, 0, 0);
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imgData.data;
-
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const maxVal = Math.max(r, g, b);
-      if (maxVal < threshold) {
-        data[i + 3] = 0;
-      } else if (maxVal < threshold + 30) {
-        data[i + 3] = Math.floor(((maxVal - threshold) / 30) * 255);
-      }
+  if (!geo.attributes.uv) {
+    const count = geo.attributes.position.count;
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(count * 2), 2));
+  }
+  // Keep only standard attributes so mergeGeometries never rejects mismatched attributes
+  for (const attrName of Object.keys(geo.attributes)) {
+    if (attrName !== 'position' && attrName !== 'normal' && attrName !== 'uv') {
+      geo.deleteAttribute(attrName);
     }
-    ctx.putImageData(imgData, 0, 0);
-    texture.needsUpdate = true;
-  };
-  img.src = path;
-
-  return texture;
+  }
+  return geo;
 }
 
 // ----------------------------------------------------
@@ -384,13 +373,7 @@ export function createProceduralBee(role: BeeRole = 'forager'): BeeMeshGroup {
   const isGuard = role === 'guard';
   const scale = isQueen ? 1.5 : isGuard ? 1.2 : 1.0;
 
-  const textureLoader = new THREE.TextureLoader();
-  const beeChitinTex = textureLoader.load('/src/assets/images/bee_chitin_macro_1793462761277.jpg');
-  beeChitinTex.colorSpace = THREE.SRGBColorSpace;
-  beeChitinTex.wrapS = THREE.RepeatWrapping;
-  beeChitinTex.wrapT = THREE.RepeatWrapping;
-  beeChitinTex.repeat.set(1.5, 1.5);
-
+  const beeChitinTex = getMacroTexture(MACRO_TEXTURES.BEE_CHITIN, 1.5, 1.5);
   const wingTex = createIridescentWingTexture();
 
   // Thorax with photorealistic honeybee velvet and chitin
@@ -486,13 +469,14 @@ export function createProceduralBee(role: BeeRole = 'forager'): BeeMeshGroup {
   bee.antennae = antennae;
 
   // Wings
+  const isSoftwareGl = detectSoftwareWebGL();
   const wingMat = new THREE.MeshPhysicalMaterial({
     map: wingTex,
     transparent: true,
-    opacity: 0.88,
+    opacity: isSoftwareGl ? 0.72 : 0.88,
     roughness: 0.15,
     metalness: 0.1,
-    transmission: 0.72,
+    transmission: isSoftwareGl ? 0 : 0.72,
     ior: 1.45,
     side: THREE.DoubleSide,
   });
@@ -571,12 +555,7 @@ export function createProceduralWasp(): WaspMeshGroup {
   const wasp = new THREE.Group() as WaspMeshGroup;
   wasp.wingPhase = 0;
 
-  const textureLoader = new THREE.TextureLoader();
-  const waspChitinTex = textureLoader.load('/src/assets/images/wasp_chitin_macro_1793462777912.jpg');
-  waspChitinTex.colorSpace = THREE.SRGBColorSpace;
-  waspChitinTex.wrapS = THREE.RepeatWrapping;
-  waspChitinTex.wrapT = THREE.RepeatWrapping;
-  waspChitinTex.repeat.set(1.5, 2.0);
+  const waspChitinTex = getMacroTexture(MACRO_TEXTURES.WASP_CHITIN, 1.5, 2.0);
 
   const thoraxGeo = new THREE.SphereGeometry(0.44, 16, 14);
   thoraxGeo.scale(0.8, 0.92, 1.25);
@@ -630,12 +609,13 @@ export function createProceduralWasp(): WaspMeshGroup {
   waspWingShape.quadraticCurveTo(0.08, 1.7, -0.06, 1.55);
   waspWingShape.bezierCurveTo(-0.25, 1.05, -0.16, 0.45, 0, 0);
 
+  const isSoftwareGl = detectSoftwareWebGL();
   const wingGeo = new THREE.ShapeGeometry(waspWingShape, 12);
   const wingMat = new THREE.MeshPhysicalMaterial({
     transparent: true,
-    opacity: 0.78,
+    opacity: isSoftwareGl ? 0.65 : 0.78,
     roughness: 0.1,
-    transmission: 0.75,
+    transmission: isSoftwareGl ? 0 : 0.75,
     side: THREE.DoubleSide,
     color: 0xFEF08A,
   });
@@ -879,13 +859,16 @@ export function createProceduralButterfly(): ButterflyMeshGroup {
 
   const leftWing = new THREE.Mesh(wingGeo, wingMat);
   leftWing.position.set(-0.05, 0.05, 0);
-  leftWing.rotation.y = Math.PI;
+  leftWing.rotation.order = 'ZYX';
+  leftWing.rotation.x = -Math.PI / 2;
+  leftWing.scale.x = -1; // Mirror cleanly across X to left side
   bfly.add(leftWing);
   bfly.leftWing = leftWing;
 
   const rightWing = new THREE.Mesh(wingGeo, wingMat);
   rightWing.position.set(0.05, 0.05, 0);
-  rightWing.scale.x = -1; // Mirror right wing
+  rightWing.rotation.order = 'ZYX';
+  rightWing.rotation.x = -Math.PI / 2;
   bfly.add(rightWing);
   bfly.rightWing = rightWing;
 
@@ -962,11 +945,12 @@ export function createGiantClover(height: number = 10): THREE.Group {
     headGroup.add(floretMesh);
   }
 
+  const isSoftwareGl = detectSoftwareWebGL();
   const nectarCore = new THREE.Mesh(
     new THREE.SphereGeometry(0.85, 16, 14),
     new THREE.MeshPhysicalMaterial({
       color: 0xF59E0B,
-      transmission: 0.85,
+      transmission: isSoftwareGl ? 0 : 0.85,
       roughness: 0.1,
       transparent: true,
       opacity: 0.9,
@@ -1116,10 +1100,11 @@ export function createGiantPoppy(height: number = 14): THREE.Group {
 
   const petalGeo = new THREE.SphereGeometry(3.0, 20, 16, 0, Math.PI * 2, 0, Math.PI / 2.3);
   const poppyTex = getMacroTexture(MACRO_TEXTURES.POPPY, 1, 1);
+  const isSoftwareGl = detectSoftwareWebGL();
   const petalMat = new THREE.MeshPhysicalMaterial({
     map: poppyTex,
     roughness: 0.35,
-    transmission: 0.32,
+    transmission: isSoftwareGl ? 0 : 0.32,
     opacity: 0.98,
     transparent: true,
     side: THREE.DoubleSide,
@@ -1165,10 +1150,11 @@ export function createGiantBluebell(height: number = 11): THREE.Group {
 
   const bellGeo = new THREE.CylinderGeometry(0.9, 0.3, 1.8, 12, 1, true);
   const bluebellTex = getMacroTexture(MACRO_TEXTURES.BLUEBELL, 1, 1);
+  const isSoftwareGl = detectSoftwareWebGL();
   const bellMat = new THREE.MeshPhysicalMaterial({
     map: bluebellTex,
     roughness: 0.32,
-    transmission: 0.45,
+    transmission: isSoftwareGl ? 0 : 0.45,
     transparent: true,
     opacity: 0.92,
     side: THREE.DoubleSide,
@@ -1385,11 +1371,12 @@ function getPineconeMaterial(): THREE.MeshStandardMaterial {
 function getBirchLeafMaterial(): THREE.MeshPhysicalMaterial {
   if (!sharedBirchLeafMat) {
     const leafTex = getMacroTexture(MACRO_TEXTURES.BOTANICAL_LEAF, 1, 1);
+    const isSoftwareGl = detectSoftwareWebGL();
     sharedBirchLeafMat = new THREE.MeshPhysicalMaterial({
       map: leafTex,
       color: 0x84CC16,
       roughness: 0.45,
-      transmission: 0.2,
+      transmission: isSoftwareGl ? 0 : 0.2,
       side: THREE.DoubleSide,
     });
   }
@@ -1406,16 +1393,26 @@ function getTwigMaterial(): THREE.MeshStandardMaterial {
   return sharedTwigMat;
 }
 
-export function createDetailedPinecone(length: number = 2.6, radius: number = 1.2): THREE.Group {
-  const coneGroup = new THREE.Group();
-  const mat = getPineconeMaterial();
+const cachedPineconeGeos: Record<string, THREE.BufferGeometry> = {};
+const cachedOakSprayGeos: Record<string, { leaves: THREE.BufferGeometry; twigs: THREE.BufferGeometry }> = {};
+const cachedPineSprayGeos: Record<string, { twigs: THREE.BufferGeometry; needles: THREE.BufferGeometry; cones: THREE.BufferGeometry }> = {};
+const cachedBirchSprayGeos: Record<string, { leaves: THREE.BufferGeometry; twigs: THREE.BufferGeometry; catkin: THREE.BufferGeometry }> = {};
 
-  // Central axis core
-  const core = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.25, radius * 0.5, length, 8), mat);
-  core.position.y = length / 2;
-  coneGroup.add(core);
+function getMergedPineconeGeometry(length: number, radius: number): THREE.BufferGeometry {
+  const key = `${length.toFixed(2)}_${radius.toFixed(2)}`;
+  if (cachedPineconeGeos[key]) return cachedPineconeGeos[key];
 
-  // 36 Spiraling Imbricated Woody Scales with distinct thickness and tapering tips
+  const parts: THREE.BufferGeometry[] = [];
+  const dummy = new THREE.Object3D();
+
+  const core = new THREE.CylinderGeometry(radius * 0.25, radius * 0.5, length, 8);
+  dummy.position.set(0, length / 2, 0);
+  dummy.rotation.set(0, 0, 0);
+  dummy.scale.set(1, 1, 1);
+  dummy.updateMatrix();
+  parts.push(bakeGeometryWithMatrix(core, dummy.matrix));
+  core.dispose();
+
   const scaleGeo = new THREE.BoxGeometry(radius * 0.45, 0.1, radius * 0.65);
   const pos = scaleGeo.attributes.position;
   for (let i = 0; i < pos.count; i++) {
@@ -1427,27 +1424,39 @@ export function createDetailedPinecone(length: number = 2.6, radius: number = 1.
   scaleGeo.computeVertexNormals();
 
   const totalScales = 36;
-  const goldenAngle = 2.39996; // 137.5 degrees
-
+  const goldenAngle = 2.39996;
   for (let s = 0; s < totalScales; s++) {
     const t = s / totalScales;
     const y = t * length * 0.88 + 0.12;
     const profileRad = Math.sin(t * Math.PI) * radius;
     const angle = s * goldenAngle;
 
-    const scaleMesh = new THREE.Mesh(scaleGeo, mat);
-    scaleMesh.position.set(Math.cos(angle) * (profileRad * 0.75), y, Math.sin(angle) * (profileRad * 0.75));
-    scaleMesh.rotation.y = -angle - Math.PI / 2;
-    scaleMesh.rotation.x = 0.32 + (1.0 - t) * 0.3;
-    scaleMesh.castShadow = true;
-    coneGroup.add(scaleMesh);
+    dummy.position.set(Math.cos(angle) * (profileRad * 0.75), y, Math.sin(angle) * (profileRad * 0.75));
+    dummy.rotation.set(0.32 + (1.0 - t) * 0.3, -angle - Math.PI / 2, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    parts.push(bakeGeometryWithMatrix(scaleGeo, dummy.matrix));
   }
+  scaleGeo.dispose();
 
-  // Woody peduncle stem
-  const stalk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 0.8, 6), mat);
-  stalk.position.y = -0.35;
-  coneGroup.add(stalk);
+  const stalk = new THREE.CylinderGeometry(0.12, 0.15, 0.8, 6);
+  dummy.position.set(0, -0.35, 0);
+  dummy.rotation.set(0, 0, 0);
+  dummy.updateMatrix();
+  parts.push(bakeGeometryWithMatrix(stalk, dummy.matrix));
+  stalk.dispose();
 
+  const merged = mergeGeometries(parts, false);
+  parts.forEach((p) => p.dispose());
+  cachedPineconeGeos[key] = merged;
+  return merged;
+}
+
+export function createDetailedPinecone(length: number = 2.6, radius: number = 1.2): THREE.Group {
+  const coneGroup = new THREE.Group();
+  const mesh = new THREE.Mesh(getMergedPineconeGeometry(length, radius), getPineconeMaterial());
+  mesh.castShadow = true;
+  coneGroup.add(mesh);
   return coneGroup;
 }
 
@@ -1456,7 +1465,6 @@ export function create3DOakLeafMesh(length: number = 3.4, width: number = 1.9): 
   const shape = createOakLeafShape(length, width);
   const geo = new THREE.ShapeGeometry(shape, 8);
 
-  // Subtle natural cupped curvature
   const pos = geo.attributes.position;
   const hw = width / 2;
   for (let i = 0; i < pos.count; i++) {
@@ -1467,16 +1475,13 @@ export function create3DOakLeafMesh(length: number = 3.4, width: number = 1.9): 
   }
   geo.computeVertexNormals();
 
-  const leafMat = getOakLeafMaterial();
-  const mesh = new THREE.Mesh(geo, leafMat);
+  const mesh = new THREE.Mesh(geo, getOakLeafMaterial());
   mesh.castShadow = true;
   leafGroup.add(mesh);
 
-  // Raised 3D midrib vein and petiole stalk
-  const twigMat = getTwigMaterial();
   const vein = new THREE.Mesh(
     new THREE.CylinderGeometry(0.04, 0.08, length * 1.15, 4),
-    twigMat
+    getTwigMaterial()
   );
   vein.position.set(0, length * 0.48, 0.04);
   leafGroup.add(vein);
@@ -1485,133 +1490,204 @@ export function create3DOakLeafMesh(length: number = 3.4, width: number = 1.9): 
 }
 
 export function createDetailedOakLeafSpray(scale: number = 1.0): THREE.Group {
-  const rosette = new THREE.Group();
-  const twigMat = getTwigMaterial();
+  const key = scale.toFixed(2);
+  if (!cachedOakSprayGeos[key]) {
+    const leafParts: THREE.BufferGeometry[] = [];
+    const twigParts: THREE.BufferGeometry[] = [];
+    const dummy = new THREE.Object3D();
 
-  // Central woody twig node
-  const node = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.15 * scale, 0.28 * scale, 4.0 * scale, 5),
-    twigMat
-  );
-  node.position.y = 2.0 * scale;
-  rosette.add(node);
+    const nodeGeo = new THREE.CylinderGeometry(0.15 * scale, 0.28 * scale, 4.0 * scale, 5);
+    dummy.position.set(0, 2.0 * scale, 0);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    twigParts.push(bakeGeometryWithMatrix(nodeGeo, dummy.matrix));
+    nodeGeo.dispose();
 
-  // 8 lobed 3D oak leaves radiating spirally
-  const leafCount = 8;
-  for (let l = 0; l < leafCount; l++) {
-    const angle = (l * Math.PI * 2) / leafCount + (l * 0.25);
-    const leaf = create3DOakLeafMesh(3.4 * scale, 1.9 * scale);
-    leaf.position.set(Math.cos(angle) * 0.35 * scale, (1.2 + l * 0.3) * scale, Math.sin(angle) * 0.35 * scale);
-    leaf.rotation.y = angle - Math.PI / 2;
-    leaf.rotation.x = 0.55 + (l % 2) * 0.18;
-    leaf.rotation.z = (l % 2 === 0 ? 0.22 : -0.22);
-    rosette.add(leaf);
+    const length = 3.4 * scale;
+    const width = 1.9 * scale;
+    const leafShape = createOakLeafShape(length, width);
+    const baseLeafGeo = new THREE.ShapeGeometry(leafShape, 8);
+    const pos = baseLeafGeo.attributes.position;
+    const hw = width / 2;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const cup = -Math.sin((Math.abs(x) / (hw + 0.1)) * Math.PI * 0.5) * 0.25 + Math.sin((y / length) * Math.PI) * 0.15;
+      pos.setZ(i, cup);
+    }
+    baseLeafGeo.computeVertexNormals();
+
+    const baseVeinGeo = new THREE.CylinderGeometry(0.04, 0.08, length * 1.15, 4);
+    baseVeinGeo.translate(0, length * 0.48, 0.04);
+
+    const leafCount = 8;
+    for (let l = 0; l < leafCount; l++) {
+      const angle = (l * Math.PI * 2) / leafCount + l * 0.25;
+      dummy.position.set(Math.cos(angle) * 0.35 * scale, (1.2 + l * 0.3) * scale, Math.sin(angle) * 0.35 * scale);
+      dummy.rotation.set(0.55 + (l % 2) * 0.18, angle - Math.PI / 2, l % 2 === 0 ? 0.22 : -0.22);
+      dummy.updateMatrix();
+      leafParts.push(bakeGeometryWithMatrix(baseLeafGeo, dummy.matrix));
+      twigParts.push(bakeGeometryWithMatrix(baseVeinGeo, dummy.matrix));
+    }
+
+    baseLeafGeo.dispose();
+    baseVeinGeo.dispose();
+
+    cachedOakSprayGeos[key] = {
+      leaves: mergeGeometries(leafParts, false),
+      twigs: mergeGeometries(twigParts, false),
+    };
+    leafParts.forEach((p) => p.dispose());
+    twigParts.forEach((p) => p.dispose());
   }
+
+  const rosette = new THREE.Group();
+  const leavesMesh = new THREE.Mesh(cachedOakSprayGeos[key].leaves, getOakLeafMaterial());
+  leavesMesh.castShadow = true;
+  rosette.add(leavesMesh);
+
+  const twigsMesh = new THREE.Mesh(cachedOakSprayGeos[key].twigs, getTwigMaterial());
+  rosette.add(twigsMesh);
 
   return rosette;
 }
 
 export function createDetailedPineNeedleSpray(scale: number = 1.0): THREE.Group {
-  const group = new THREE.Group();
-  const twigMat = getTwigMaterial();
-  const needleMat = getPineNeedleMaterial();
+  const key = scale.toFixed(2);
+  if (!cachedPineSprayGeos[key]) {
+    const twigParts: THREE.BufferGeometry[] = [];
+    const needleParts: THREE.BufferGeometry[] = [];
+    const coneParts: THREE.BufferGeometry[] = [];
+    const dummy = new THREE.Object3D();
 
-  const length = 7.5 * scale;
-  // Woody branchlet twig
-  const twig = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.18 * scale, 0.35 * scale, length, 6),
-    twigMat
-  );
-  twig.position.y = length / 2;
-  group.add(twig);
+    const length = 7.5 * scale;
+    const twigGeo = new THREE.CylinderGeometry(0.18 * scale, 0.35 * scale, length, 6);
+    dummy.position.set(0, length / 2, 0);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    twigParts.push(bakeGeometryWithMatrix(twigGeo, dummy.matrix));
+    twigGeo.dispose();
 
-  // Slender curved 3D needle geometry
-  const needleGeo = new THREE.ConeGeometry(0.045 * scale, 2.6 * scale, 4);
-  needleGeo.translate(0, 1.3 * scale, 0);
+    const needleGeo = new THREE.ConeGeometry(0.045 * scale, 2.6 * scale, 4);
+    needleGeo.translate(0, 1.3 * scale, 0);
 
-  // 24 Radial Needle Fascicles (Pairs of needles) spiraling along the twig
-  const fascicleCount = 24;
-  for (let f = 0; f < fascicleCount; f++) {
-    const t = f / fascicleCount;
-    const y = (0.18 + t * 0.78) * length;
-    const baseAngle = f * 1.85;
-
-    // Needle pair spreading in a V
-    for (let s of [-0.22, 0.22]) {
-      const needle = new THREE.Mesh(needleGeo, needleMat);
-      needle.position.set(Math.cos(baseAngle) * 0.28 * scale, y, Math.sin(baseAngle) * 0.28 * scale);
-      needle.rotation.y = baseAngle + s;
-      needle.rotation.x = 0.58 + Math.sin(baseAngle) * 0.1;
-      needle.rotation.z = -0.58 * Math.cos(baseAngle);
-      group.add(needle);
+    const fascicleCount = 24;
+    for (let f = 0; f < fascicleCount; f++) {
+      const t = f / fascicleCount;
+      const y = (0.18 + t * 0.78) * length;
+      const baseAngle = f * 1.85;
+      for (const s of [-0.22, 0.22]) {
+        dummy.position.set(Math.cos(baseAngle) * 0.28 * scale, y, Math.sin(baseAngle) * 0.28 * scale);
+        dummy.rotation.set(0.58 + Math.sin(baseAngle) * 0.1, baseAngle + s, -0.58 * Math.cos(baseAngle));
+        dummy.updateMatrix();
+        needleParts.push(bakeGeometryWithMatrix(needleGeo, dummy.matrix));
+      }
     }
+    needleGeo.dispose();
+
+    const coneGeo1 = getMergedPineconeGeometry(2.4 * scale, 1.1 * scale);
+    dummy.position.set(0.45 * scale, length * 0.45, 0.25 * scale);
+    dummy.rotation.set(0, 0.5, 1.25);
+    dummy.updateMatrix();
+    coneParts.push(bakeGeometryWithMatrix(coneGeo1, dummy.matrix));
+
+    const coneGeo2 = getMergedPineconeGeometry(2.0 * scale, 0.95 * scale);
+    dummy.position.set(-0.4 * scale, length * 0.52, -0.3 * scale);
+    dummy.rotation.set(0, -0.8, -1.15);
+    dummy.updateMatrix();
+    coneParts.push(bakeGeometryWithMatrix(coneGeo2, dummy.matrix));
+
+    cachedPineSprayGeos[key] = {
+      twigs: mergeGeometries(twigParts, false),
+      needles: mergeGeometries(needleParts, false),
+      cones: mergeGeometries(coneParts, false),
+    };
+    twigParts.forEach((p) => p.dispose());
+    needleParts.forEach((p) => p.dispose());
+    coneParts.forEach((p) => p.dispose());
   }
 
-  // Clusters of 2 detailed 3D pinecones at branchlet node
-  const cone1 = createDetailedPinecone(2.4 * scale, 1.1 * scale);
-  cone1.position.set(0.45 * scale, length * 0.45, 0.25 * scale);
-  cone1.rotation.z = 1.25;
-  cone1.rotation.y = 0.5;
-  group.add(cone1);
-
-  const cone2 = createDetailedPinecone(2.0 * scale, 0.95 * scale);
-  cone2.position.set(-0.4 * scale, length * 0.52, -0.3 * scale);
-  cone2.rotation.z = -1.15;
-  cone2.rotation.y = -0.8;
-  group.add(cone2);
+  const group = new THREE.Group();
+  group.add(new THREE.Mesh(cachedPineSprayGeos[key].twigs, getTwigMaterial()));
+  const needlesMesh = new THREE.Mesh(cachedPineSprayGeos[key].needles, getPineNeedleMaterial());
+  needlesMesh.castShadow = true;
+  group.add(needlesMesh);
+  const conesMesh = new THREE.Mesh(cachedPineSprayGeos[key].cones, getPineconeMaterial());
+  conesMesh.castShadow = true;
+  group.add(conesMesh);
 
   return group;
 }
 
+let sharedCatkinMat: THREE.MeshStandardMaterial | null = null;
+
 export function createDetailedBirchLeafSpray(scale: number = 1.0): THREE.Group {
-  const group = new THREE.Group();
-  const twigMat = getTwigMaterial();
-  const leafMat = getBirchLeafMaterial();
+  const key = scale.toFixed(2);
+  if (!cachedBirchSprayGeos[key]) {
+    const leafParts: THREE.BufferGeometry[] = [];
+    const twigParts: THREE.BufferGeometry[] = [];
+    const dummy = new THREE.Object3D();
 
-  // Graceful weeping pendulous curve
-  const curve = new THREE.CatmullRomCurve3([
-    new THREE.Vector3(0, 0, 0),
-    new THREE.Vector3(0.5 * scale, -2.5 * scale, 0.2 * scale),
-    new THREE.Vector3(1.2 * scale, -5.5 * scale, -0.4 * scale),
-    new THREE.Vector3(1.6 * scale, -8.5 * scale, 0.1 * scale),
-  ]);
+    const curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0.5 * scale, -2.5 * scale, 0.2 * scale),
+      new THREE.Vector3(1.2 * scale, -5.5 * scale, -0.4 * scale),
+      new THREE.Vector3(1.6 * scale, -8.5 * scale, 0.1 * scale),
+    ]);
 
-  const twigMesh = new THREE.Mesh(
-    new THREE.TubeGeometry(curve, 10, 0.09 * scale, 5, false),
-    twigMat
-  );
-  group.add(twigMesh);
+    const tubeGeo = new THREE.TubeGeometry(curve, 10, 0.09 * scale, 5, false);
+    dummy.position.set(0, 0, 0);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    twigParts.push(bakeGeometryWithMatrix(tubeGeo, dummy.matrix));
+    tubeGeo.dispose();
 
-  // 3D Deltoid serrated birch leaf geometry
-  const leafShape = createBirchLeafShape(2.2 * scale, 1.4 * scale);
-  const leafGeo = new THREE.ShapeGeometry(leafShape, 6);
+    const leafShape = createBirchLeafShape(2.2 * scale, 1.4 * scale);
+    const leafGeo = new THREE.ShapeGeometry(leafShape, 6);
+    const petioleGeo = new THREE.CylinderGeometry(0.03 * scale, 0.03 * scale, 0.6 * scale, 4);
 
-  // Attach 8 fluttering leaves along the weeping branchlet
-  const points = curve.getPoints(8);
-  for (let i = 1; i < points.length; i++) {
-    const pt = points[i];
-    const leafMesh = new THREE.Mesh(leafGeo, leafMat);
-    leafMesh.position.set(pt.x, pt.y, pt.z);
-    leafMesh.rotation.y = (i * Math.PI) / 2.5;
-    leafMesh.rotation.x = 0.4 + (i * 0.1);
-    leafMesh.rotation.z = (i % 2 === 0 ? 0.3 : -0.3);
-    leafMesh.castShadow = true;
-    group.add(leafMesh);
+    const points = curve.getPoints(8);
+    for (let i = 1; i < points.length; i++) {
+      const pt = points[i];
+      dummy.position.set(pt.x, pt.y, pt.z);
+      dummy.rotation.set(0.4 + i * 0.1, (i * Math.PI) / 2.5, i % 2 === 0 ? 0.3 : -0.3);
+      dummy.updateMatrix();
+      leafParts.push(bakeGeometryWithMatrix(leafGeo, dummy.matrix));
 
-    // Petiole stem
-    const petiole = new THREE.Mesh(new THREE.CylinderGeometry(0.03 * scale, 0.03 * scale, 0.6 * scale, 4), twigMat);
-    petiole.position.set(pt.x, pt.y + 0.25 * scale, pt.z);
-    group.add(petiole);
+      dummy.position.set(pt.x, pt.y + 0.25 * scale, pt.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      twigParts.push(bakeGeometryWithMatrix(petioleGeo, dummy.matrix));
+    }
+    leafGeo.dispose();
+    petioleGeo.dispose();
+
+    const tip = points[points.length - 1];
+    const catkinGeo = new THREE.CylinderGeometry(0.12 * scale, 0.08 * scale, 1.8 * scale, 6);
+    catkinGeo.translate(tip.x, tip.y - 0.9 * scale, tip.z);
+
+    cachedBirchSprayGeos[key] = {
+      leaves: mergeGeometries(leafParts, false),
+      twigs: mergeGeometries(twigParts, false),
+      catkin: catkinGeo,
+    };
+    leafParts.forEach((p) => p.dispose());
+    twigParts.forEach((p) => p.dispose());
   }
 
-  // Hanging pollen catkin tassel at branchlet tip
-  const catkin = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.12 * scale, 0.08 * scale, 1.8 * scale, 6),
-    new THREE.MeshStandardMaterial({ color: 0xD97706, roughness: 0.8 })
-  );
-  const tip = points[points.length - 1];
-  catkin.position.set(tip.x, tip.y - 0.9 * scale, tip.z);
-  group.add(catkin);
+  if (!sharedCatkinMat) {
+    sharedCatkinMat = new THREE.MeshStandardMaterial({ color: 0xD97706, roughness: 0.8 });
+  }
+
+  const group = new THREE.Group();
+  group.add(new THREE.Mesh(cachedBirchSprayGeos[key].twigs, getTwigMaterial()));
+  const leavesMesh = new THREE.Mesh(cachedBirchSprayGeos[key].leaves, getBirchLeafMaterial());
+  leavesMesh.castShadow = true;
+  group.add(leavesMesh);
+  group.add(new THREE.Mesh(cachedBirchSprayGeos[key].catkin, sharedCatkinMat));
 
   return group;
 }
@@ -1718,12 +1794,7 @@ export function createScotsPineTree(height: number = 46): THREE.Group {
 export function createAncientOakTree(trunkHeight: number = 52): THREE.Group {
   const tree = new THREE.Group();
 
-  const textureLoader = new THREE.TextureLoader();
-  const barkTex = textureLoader.load('/src/assets/images/oak_bark_macro_1793461527415.jpg');
-  barkTex.colorSpace = THREE.SRGBColorSpace;
-  barkTex.wrapS = THREE.RepeatWrapping;
-  barkTex.wrapT = THREE.RepeatWrapping;
-  barkTex.repeat.set(5, 10);
+  const barkTex = getMacroTexture(MACRO_TEXTURES.OAK_BARK, 5, 10);
 
   const barkMat = new THREE.MeshStandardMaterial({
     map: barkTex,
@@ -2145,12 +2216,7 @@ export function createGardenTrowel(): THREE.Group {
 export function createTreeHollowHive(): THREE.Group {
   const tree = new THREE.Group();
 
-  const textureLoader = new THREE.TextureLoader();
-  const barkTex = textureLoader.load('/src/assets/images/oak_bark_macro_1793461527415.jpg');
-  barkTex.colorSpace = THREE.SRGBColorSpace;
-  barkTex.wrapS = THREE.RepeatWrapping;
-  barkTex.wrapT = THREE.RepeatWrapping;
-  barkTex.repeat.set(4, 6);
+  const barkTex = getMacroTexture(MACRO_TEXTURES.OAK_BARK, 4, 6);
 
   const trunkMat = new THREE.MeshStandardMaterial({
     map: barkTex,
@@ -2222,10 +2288,11 @@ export function createTreeHollowHive(): THREE.Group {
   // ------------------------------------------------------------------
   // ESTABLISHED HIVE COMB ARCHITECTURE (VISIBLE FROM ENTRANCE & OUTSIDE)
   // ------------------------------------------------------------------
+  const isSoftwareGl = detectSoftwareWebGL();
   const beeswaxMat = new THREE.MeshStandardMaterial({ color: 0xFBBF24, roughness: 0.55, metalness: 0.05 });
   const amberHoneyMat = new THREE.MeshPhysicalMaterial({
     color: 0xF59E0B,
-    transmission: 0.82,
+    transmission: isSoftwareGl ? 0 : 0.82,
     opacity: 0.96,
     transparent: true,
     roughness: 0.08,
@@ -2339,6 +2406,8 @@ export function createTreeHollowHive(): THREE.Group {
   fanner.rotation.y = Math.PI; // Facing into hive to fan air out
   tree.add(fanner);
 
+  tree.userData.residentBees = [guard1, guard2, fanner];
+
   // Bracket fungi on side of hive tree
   const sideFungus1 = createBracketFungus(3.8, 2.8);
   sideFungus1.position.set(19, 12, 4);
@@ -2415,12 +2484,7 @@ export function createGiantFern(height: number = 14): THREE.Group {
   const fern = new THREE.Group();
   const frondCount = 6;
 
-  const textureLoader = new THREE.TextureLoader();
-  const leafTex = textureLoader.load('/src/assets/images/botanical_leaf_macro_1793462790946.jpg');
-  leafTex.colorSpace = THREE.SRGBColorSpace;
-  leafTex.wrapS = THREE.RepeatWrapping;
-  leafTex.wrapT = THREE.RepeatWrapping;
-  leafTex.repeat.set(1, 2);
+  const leafTex = getMacroTexture(MACRO_TEXTURES.BOTANICAL_LEAF, 1, 2);
 
   const leafMat = new THREE.MeshStandardMaterial({
     map: leafTex,
@@ -2475,12 +2539,7 @@ export function createGiantFern(height: number = 14): THREE.Group {
 export function createFallenMossyLog(length: number = 32, radius: number = 4.8): THREE.Group {
   const logGroup = new THREE.Group();
 
-  const textureLoader = new THREE.TextureLoader();
-  const barkTex = textureLoader.load('/src/assets/images/oak_bark_macro_1793461527415.jpg');
-  barkTex.colorSpace = THREE.SRGBColorSpace;
-  barkTex.wrapS = THREE.RepeatWrapping;
-  barkTex.wrapT = THREE.RepeatWrapping;
-  barkTex.repeat.set(3, 8);
+  const barkTex = getMacroTexture(MACRO_TEXTURES.OAK_BARK, 3, 8);
 
   const barkMat = new THREE.MeshStandardMaterial({
     map: barkTex,
@@ -2525,45 +2584,49 @@ export function createFallenMossyLog(length: number = 32, radius: number = 4.8):
 
 export function createDistantForestHorizon(): THREE.Group {
   const forest = new THREE.Group();
+  const dummy = new THREE.Object3D();
 
   // 1. 360-Degree Panoramic Woodland Landscape Backdrop Cylinder
   const panoramaTex = getMacroTexture(MACRO_TEXTURES.FOREST_PANORAMA, 4, 1);
-  const panoramaGeo = new THREE.CylinderGeometry(380, 380, 160, 64, 1, true);
+  const panoramaGeo = new THREE.CylinderGeometry(380, 380, 180, 64, 1, true);
   const panoramaMat = new THREE.MeshBasicMaterial({
     map: panoramaTex,
     side: THREE.BackSide,
     fog: true,
   });
   const panoramaMesh = new THREE.Mesh(panoramaGeo, panoramaMat);
-  panoramaMesh.position.y = 65;
+  panoramaMesh.position.y = 75;
   forest.add(panoramaMesh);
 
-  // 2. Rolling Meadow Hills & Forest Ridges (Verdant Amphitheater Knolls)
+  // 2. Rolling Meadow Hills & Forest Ridges (Single InstancedMesh draw call)
   const turfTex = getMacroTexture(MACRO_TEXTURES.MEADOW_TURF, 3, 3);
   const hillMat = new THREE.MeshStandardMaterial({
     map: turfTex,
     color: 0x15803D,
     roughness: 0.92,
   });
-  const hillGeo = new THREE.SphereGeometry(45, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2.2);
+  const hillGeo = new THREE.SphereGeometry(45, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2.2);
   hillGeo.scale(2.2, 0.42, 1.6);
 
   const hillCount = 24;
+  const hillsInstanced = new THREE.InstancedMesh(hillGeo, hillMat, hillCount);
+  hillsInstanced.receiveShadow = true;
   for (let h = 0; h < hillCount; h++) {
     const hAngle = (h * Math.PI * 2) / hillCount + (h % 3) * 0.08;
     const hDist = 210 + (h % 5) * 18;
-    const hill = new THREE.Mesh(hillGeo, hillMat);
-    hill.position.set(
-      Math.cos(hAngle) * hDist,
-      -3 + (h % 3) * 5,
-      Math.sin(hAngle) * hDist
-    );
-    hill.rotation.y = hAngle + (h % 2) * 0.3;
-    hill.receiveShadow = true;
-    forest.add(hill);
+    const hx = Math.cos(hAngle) * hDist;
+    const hz = Math.sin(hAngle) * hDist;
+    const groundY = terrainHeightAt(hx, hz);
+    dummy.position.set(hx, groundY - 4 + (h % 3) * 3, hz);
+    dummy.rotation.set(0, hAngle + (h % 2) * 0.3, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    hillsInstanced.setMatrixAt(h, dummy.matrix);
   }
+  hillsInstanced.instanceMatrix.needsUpdate = true;
+  forest.add(hillsInstanced);
 
-  // 3. Dense Continuous 3D Woodland Boundary Wall (120+ Volumetric Trees in 3 Staggered Depth Rings)
+  // 3. Dense Continuous 3D Woodland Boundary Wall via InstancedMesh batches (~15 draw calls total)
   const oakBarkTex = getMacroTexture(MACRO_TEXTURES.OAK_BARK, 1, 3);
   const darkTrunkMat = new THREE.MeshStandardMaterial({
     map: oakBarkTex,
@@ -2580,7 +2643,6 @@ export function createDistantForestHorizon(): THREE.Group {
   const leafMacroTex = getMacroTexture(MACRO_TEXTURES.BOTANICAL_LEAF, 1, 1);
   const pineNeedleTex = getMacroTexture(MACRO_TEXTURES.PINE_NEEDLE_SPRAY, 1, 1);
 
-  // Volumetric Foliage Materials
   const pineCanopyMat = new THREE.MeshStandardMaterial({
     map: pineNeedleTex,
     color: 0x064E3B,
@@ -2600,10 +2662,8 @@ export function createDistantForestHorizon(): THREE.Group {
     metalness: 0.03,
   });
 
-  // Reusable Volumetric Canopy Geometries
-  // 1. Organic Scots Pine Foliage Tier Skirt
   function createPineTierGeometry(radius: number, height: number): THREE.BufferGeometry {
-    const geo = new THREE.ConeGeometry(radius, height, 14, 2, false);
+    const geo = new THREE.ConeGeometry(radius, height, 12, 2, false);
     const pos = geo.attributes.position;
     for (let p = 0; p < pos.count; p++) {
       const y = pos.getY(p);
@@ -2620,7 +2680,6 @@ export function createDistantForestHorizon(): THREE.Group {
     return geo;
   }
 
-  // 2. Billowing Cloud Foliage Clump for Oaks & Birches
   function createCloudLobeGeometry(radius: number): THREE.BufferGeometry {
     const geo = new THREE.DodecahedronGeometry(radius, 2);
     const pos = geo.attributes.position;
@@ -2642,98 +2701,160 @@ export function createDistantForestHorizon(): THREE.Group {
     createPineTierGeometry(7.2, 8.0),
     createPineTierGeometry(4.8, 7.5),
   ];
+  const spireGeo = new THREE.ConeGeometry(2.2, 7.5, 8);
 
   const oakClumpGeos = [
     createCloudLobeGeometry(8.5),
     createCloudLobeGeometry(7.2),
     createCloudLobeGeometry(6.0),
   ];
+  const baseTrunkGeo = new THREE.CylinderGeometry(1.8, 3.8, 1.0, 10);
 
-  const totalTrees = 120;
+  const totalTrees = 120; // 60 pines, 30 oaks, 30 birches
+  const darkTrunkCount = 90; // 60 pines + 30 oaks
+  const birchCount = 30;
+  const pineCount = 60;
+  const oakCount = 30;
+
+  const darkTrunks = new THREE.InstancedMesh(baseTrunkGeo, darkTrunkMat, darkTrunkCount);
+  const birchTrunks = new THREE.InstancedMesh(baseTrunkGeo, birchTrunkMat, birchCount);
+  const pineTierMeshes = pineTierGeos.map((g) => new THREE.InstancedMesh(g, pineCanopyMat, pineCount));
+  const pineSpires = new THREE.InstancedMesh(spireGeo, pineCanopyMat, pineCount);
+
+  const oakLobes0 = new THREE.InstancedMesh(oakClumpGeos[0], oakCanopyMat, oakCount);
+  const oakLobes1 = new THREE.InstancedMesh(oakClumpGeos[1], oakCanopyMat, oakCount * 4);
+  const oakLobes2 = new THREE.InstancedMesh(oakClumpGeos[2], oakCanopyMat, oakCount * 3);
+
+  const birchLobes1 = new THREE.InstancedMesh(oakClumpGeos[1], birchCanopyMat, birchCount * 2);
+  const birchLobes2 = new THREE.InstancedMesh(oakClumpGeos[2], birchCanopyMat, birchCount * 3);
+
+  let darkTrunkIdx = 0;
+  let pineIdx = 0;
+  let oakIdx = 0;
+  let birchIdx = 0;
+
   for (let i = 0; i < totalTrees; i++) {
-    const angle = (i * Math.PI * 2) / totalTrees + (Math.sin(i * 1.3) * 0.04);
-    const ring = i % 3; // 3 Staggered Depth Rings: Inner (115), Mid (155), Far (195)
-    const r = (ring === 0 ? 118 : ring === 1 ? 158 : 198) + (Math.sin(i * 2.5) * 14);
-    const treeType = i % 4; // 0, 2: Scots Pine, 1: Ancient Oak, 3: Silver Birch
+    const angle = (i * Math.PI * 2) / totalTrees + Math.sin(i * 1.3) * 0.04;
+    const ring = i % 3;
+    const r = (ring === 0 ? 118 : ring === 1 ? 158 : 198) + Math.sin(i * 2.5) * 14;
+    const tx = Math.cos(angle) * r;
+    const tz = Math.sin(angle) * r;
+    const ty = terrainHeightAt(tx, tz) - 1.2;
+    const treeType = i % 4; // 0, 2: Pine, 1: Oak, 3: Birch
+    const h = (ring === 2 ? 56 : 46) + (i % 6) * 5 + ((i * 7) % 6);
+    const trunkH = h * 0.85;
 
-    const treeGroup = new THREE.Group();
-    const h = (ring === 2 ? 56 : 46) + (i % 6) * 5 + Math.random() * 6;
+    if (treeType === 3) {
+      dummy.position.set(tx, ty + trunkH / 2, tz);
+      dummy.rotation.set(0, angle, 0);
+      dummy.scale.set(1, trunkH, 1);
+      dummy.updateMatrix();
+      birchTrunks.setMatrixAt(birchIdx, dummy.matrix);
 
-    const isBirch = treeType === 3;
-    const trunk = new THREE.Mesh(
-      new THREE.CylinderGeometry(1.8, 3.8, h * 0.85, 10),
-      isBirch ? birchTrunkMat : darkTrunkMat
-    );
-    trunk.position.y = (h * 0.85) / 2;
-    trunk.castShadow = ring < 2;
-    trunk.receiveShadow = true;
-    treeGroup.add(trunk);
-
-    if (treeType === 0 || treeType === 2) {
-      // Volumetric Multi-Tier Scots Pine
-      const tierCount = 5;
-      for (let t = 0; t < tierCount; t++) {
-        const tierY = h * 0.38 + t * (h * 0.14);
-        const tierMesh = new THREE.Mesh(pineTierGeos[t], pineCanopyMat);
-        tierMesh.position.y = tierY;
-        tierMesh.rotation.y = (t * 1.4) + i * 0.2;
-        tierMesh.castShadow = ring < 2;
-        tierMesh.receiveShadow = true;
-        treeGroup.add(tierMesh);
-      }
-      // Crowning needle spire
-      const spire = new THREE.Mesh(new THREE.ConeGeometry(2.2, 7.5, 8), pineCanopyMat);
-      spire.position.y = h * 0.38 + 4 * (h * 0.14) + 6.5;
-      spire.castShadow = ring < 2;
-      treeGroup.add(spire);
-    } else if (treeType === 1) {
-      // Volumetric Ancient Oak: 8-Lobe Billowing Canopy Dome
-      const crownBaseY = h * 0.72;
-      const crownRadius = 14.5;
-      const lobePositions = [
-        { x: 0, y: crownBaseY + 6.5, z: 0, geoIdx: 0 },
-        { x: crownRadius * 0.65, y: crownBaseY + 3.2, z: crownRadius * 0.35, geoIdx: 1 },
-        { x: -crownRadius * 0.6, y: crownBaseY + 3.8, z: crownRadius * 0.4, geoIdx: 1 },
-        { x: crownRadius * 0.25, y: crownBaseY + 2.8, z: -crownRadius * 0.65, geoIdx: 1 },
-        { x: -crownRadius * 0.45, y: crownBaseY + 3.4, z: -crownRadius * 0.55, geoIdx: 1 },
-        { x: crownRadius * 0.75, y: crownBaseY + 1.2, z: -crownRadius * 0.2, geoIdx: 2 },
-        { x: -crownRadius * 0.7, y: crownBaseY + 1.5, z: 0, geoIdx: 2 },
-        { x: 0, y: crownBaseY + 9.5, z: 0, geoIdx: 2 },
+      const crownBaseY = ty + h * 0.68;
+      const b1Positions = [
+        { x: -4.5, y: crownBaseY + 2.5, z: 3.5 },
+        { x: 4.8, y: crownBaseY + 4.2, z: -3.0 },
       ];
-
-      lobePositions.forEach((lp) => {
-        const lobeMesh = new THREE.Mesh(oakClumpGeos[lp.geoIdx], oakCanopyMat);
-        lobeMesh.position.set(lp.x, lp.y, lp.z);
-        lobeMesh.rotation.y = i * 0.5 + lp.geoIdx;
-        lobeMesh.castShadow = ring < 2;
-        lobeMesh.receiveShadow = true;
-        treeGroup.add(lobeMesh);
+      b1Positions.forEach((bp, k) => {
+        dummy.position.set(tx + bp.x, bp.y, tz + bp.z);
+        dummy.rotation.set(0, i * 0.8, 0);
+        dummy.scale.set(0.9, 1.25, 0.9);
+        dummy.updateMatrix();
+        birchLobes1.setMatrixAt(birchIdx * 2 + k, dummy.matrix);
       });
+
+      const b2Positions = [
+        { x: 2.5, y: crownBaseY + 7.5, z: 2.5 },
+        { x: -3.0, y: crownBaseY + 8.8, z: -2.0 },
+        { x: 0, y: crownBaseY + 11.2, z: 0 },
+      ];
+      b2Positions.forEach((bp, k) => {
+        dummy.position.set(tx + bp.x, bp.y, tz + bp.z);
+        dummy.rotation.set(0, i * 0.8 + k, 0);
+        dummy.scale.set(0.9, 1.25, 0.9);
+        dummy.updateMatrix();
+        birchLobes2.setMatrixAt(birchIdx * 3 + k, dummy.matrix);
+      });
+
+      birchIdx++;
     } else {
-      // Volumetric Silver Birch: Graceful Weeping Canopy Clouds
-      const crownBaseY = h * 0.68;
-      const birchCanopyPositions = [
-        { x: -4.5, y: crownBaseY + 2.5, z: 3.5, geoIdx: 1 },
-        { x: 4.8, y: crownBaseY + 4.2, z: -3.0, geoIdx: 1 },
-        { x: 2.5, y: crownBaseY + 7.5, z: 2.5, geoIdx: 2 },
-        { x: -3.0, y: crownBaseY + 8.8, z: -2.0, geoIdx: 2 },
-        { x: 0, y: crownBaseY + 11.2, z: 0, geoIdx: 2 },
-      ];
+      dummy.position.set(tx, ty + trunkH / 2, tz);
+      dummy.rotation.set(0, angle, 0);
+      dummy.scale.set(1, trunkH, 1);
+      dummy.updateMatrix();
+      darkTrunks.setMatrixAt(darkTrunkIdx++, dummy.matrix);
 
-      birchCanopyPositions.forEach((bp) => {
-        const bMesh = new THREE.Mesh(oakClumpGeos[bp.geoIdx], birchCanopyMat);
-        bMesh.position.set(bp.x, bp.y, bp.z);
-        bMesh.scale.set(0.9, 1.25, 0.9);
-        bMesh.rotation.y = i * 0.8;
-        bMesh.castShadow = ring < 2;
-        bMesh.receiveShadow = true;
-        treeGroup.add(bMesh);
-      });
+      if (treeType === 0 || treeType === 2) {
+        for (let t = 0; t < 5; t++) {
+          const tierY = ty + h * 0.38 + t * (h * 0.14);
+          dummy.position.set(tx, tierY, tz);
+          dummy.rotation.set(0, t * 1.4 + i * 0.2, 0);
+          dummy.scale.set(1, 1, 1);
+          dummy.updateMatrix();
+          pineTierMeshes[t].setMatrixAt(pineIdx, dummy.matrix);
+        }
+        dummy.position.set(tx, ty + h * 0.38 + 4 * (h * 0.14) + 6.5, tz);
+        dummy.rotation.set(0, i * 0.2, 0);
+        dummy.scale.set(1, 1, 1);
+        dummy.updateMatrix();
+        pineSpires.setMatrixAt(pineIdx, dummy.matrix);
+        pineIdx++;
+      } else {
+        const crownBaseY = ty + h * 0.72;
+        const crownRadius = 14.5;
+
+        dummy.position.set(tx, crownBaseY + 6.5, tz);
+        dummy.rotation.set(0, i * 0.5, 0);
+        dummy.scale.set(1, 1, 1);
+        dummy.updateMatrix();
+        oakLobes0.setMatrixAt(oakIdx, dummy.matrix);
+
+        const o1 = [
+          { x: crownRadius * 0.65, y: crownBaseY + 3.2, z: crownRadius * 0.35 },
+          { x: -crownRadius * 0.6, y: crownBaseY + 3.8, z: crownRadius * 0.4 },
+          { x: crownRadius * 0.25, y: crownBaseY + 2.8, z: -crownRadius * 0.65 },
+          { x: -crownRadius * 0.45, y: crownBaseY + 3.4, z: -crownRadius * 0.55 },
+        ];
+        o1.forEach((lp, k) => {
+          dummy.position.set(tx + lp.x, lp.y, tz + lp.z);
+          dummy.rotation.set(0, i * 0.5 + 1, 0);
+          dummy.updateMatrix();
+          oakLobes1.setMatrixAt(oakIdx * 4 + k, dummy.matrix);
+        });
+
+        const o2 = [
+          { x: crownRadius * 0.75, y: crownBaseY + 1.2, z: -crownRadius * 0.2 },
+          { x: -crownRadius * 0.7, y: crownBaseY + 1.5, z: 0 },
+          { x: 0, y: crownBaseY + 9.5, z: 0 },
+        ];
+        o2.forEach((lp, k) => {
+          dummy.position.set(tx + lp.x, lp.y, tz + lp.z);
+          dummy.rotation.set(0, i * 0.5 + 2, 0);
+          dummy.updateMatrix();
+          oakLobes2.setMatrixAt(oakIdx * 3 + k, dummy.matrix);
+        });
+
+        oakIdx++;
+      }
     }
-
-    treeGroup.position.set(Math.cos(angle) * r, 0, Math.sin(angle) * r);
-    forest.add(treeGroup);
   }
+
+  [
+    darkTrunks,
+    birchTrunks,
+    ...pineTierMeshes,
+    pineSpires,
+    oakLobes0,
+    oakLobes1,
+    oakLobes2,
+    birchLobes1,
+    birchLobes2,
+  ].forEach((instMesh) => {
+    instMesh.instanceMatrix.needsUpdate = true;
+    instMesh.receiveShadow = true;
+    forest.add(instMesh);
+  });
 
   return forest;
 }
@@ -2792,19 +2913,28 @@ export function createSkyDome(): THREE.Mesh {
   return skyDome;
 }
 
-export function createHexCombCell(cell: {
-  q: number;
-  r: number;
-  type: CellType;
-  fillAmount: number;
-  broodStage?: BroodStage;
-}): THREE.Group {
-  const group = new THREE.Group();
+interface CombCache {
+  wallGeo: THREE.ExtrudeGeometry;
+  wallMat: THREE.MeshStandardMaterial;
+  honeyGeo: THREE.CylinderGeometry;
+  honeyMat: THREE.MeshPhysicalMaterial;
+  capGeo: THREE.CylinderGeometry;
+  capMat: THREE.MeshStandardMaterial;
+  pollenGeo: THREE.CylinderGeometry;
+  pollenMat: THREE.MeshStandardMaterial;
+  eggGeo: THREE.CylinderGeometry;
+  eggMat: THREE.MeshStandardMaterial;
+  larvaGeo: THREE.SphereGeometry;
+  larvaMat: THREE.MeshStandardMaterial;
+}
+
+let sharedCombCache: CombCache | null = null;
+
+function getCombCache(): CombCache {
+  if (sharedCombCache) return sharedCombCache;
 
   const hexRadius = 1.0;
-  const x = hexRadius * Math.sqrt(3) * (cell.q + cell.r / 2);
-  const y = hexRadius * 1.5 * cell.r;
-  group.position.set(x, y, 0);
+  const innerRadius = hexRadius * 0.88;
 
   const hexShape = new THREE.Shape();
   for (let i = 0; i < 6; i++) {
@@ -2817,7 +2947,6 @@ export function createHexCombCell(cell: {
   hexShape.closePath();
 
   const holePath = new THREE.Path();
-  const innerRadius = hexRadius * 0.88;
   for (let i = 0; i < 6; i++) {
     const angle = (i * Math.PI) / 3;
     const px = Math.cos(angle) * innerRadius;
@@ -2828,94 +2957,98 @@ export function createHexCombCell(cell: {
   holePath.closePath();
   hexShape.holes.push(holePath);
 
-  const extrudeSettings = {
+  const wallGeo = new THREE.ExtrudeGeometry(hexShape, {
     depth: 1.6,
     bevelEnabled: true,
     bevelSegments: 2,
     steps: 1,
     bevelSize: 0.04,
     bevelThickness: 0.04,
+  });
+
+  const honeyGeo = new THREE.CylinderGeometry(innerRadius * 0.95, innerRadius * 0.95, 1.0, 6);
+  honeyGeo.rotateX(Math.PI / 2);
+
+  const capGeo = new THREE.CylinderGeometry(innerRadius * 0.96, innerRadius * 0.96, 0.22, 6);
+  capGeo.rotateX(Math.PI / 2);
+
+  const pollenGeo = new THREE.CylinderGeometry(innerRadius * 0.95, innerRadius * 0.95, 1.25, 6);
+  pollenGeo.rotateX(Math.PI / 2);
+
+  const eggGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.5, 8);
+  eggGeo.scale(1.0, 1.2, 1.0);
+  eggGeo.rotateX(Math.PI / 2);
+
+  const larvaGeo = new THREE.SphereGeometry(innerRadius * 0.52, 14, 10);
+  larvaGeo.scale(0.85, 1.2, 0.75);
+
+  const isSoftwareGl = detectSoftwareWebGL();
+  sharedCombCache = {
+    wallGeo,
+    wallMat: new THREE.MeshStandardMaterial({ color: 0xFBBF24, roughness: 0.58, metalness: 0.04 }),
+    honeyGeo,
+    honeyMat: new THREE.MeshPhysicalMaterial({
+      color: 0xF59E0B,
+      transmission: isSoftwareGl ? 0 : 0.84,
+      opacity: 0.95,
+      transparent: true,
+      roughness: 0.08,
+    }),
+    capGeo,
+    capMat: new THREE.MeshStandardMaterial({ color: 0xFEF3C7, roughness: 0.68 }),
+    pollenGeo,
+    pollenMat: new THREE.MeshStandardMaterial({ color: 0xEAB308, roughness: 0.92 }),
+    eggGeo,
+    eggMat: new THREE.MeshStandardMaterial({ color: 0xFFFFFF, roughness: 0.25 }),
+    larvaGeo,
+    larvaMat: new THREE.MeshStandardMaterial({ color: 0xFEF9C3, roughness: 0.35 }),
   };
 
-  const wallMat = new THREE.MeshStandardMaterial({
-    color: 0xFBBF24,
-    roughness: 0.58,
-    metalness: 0.04,
-  });
-  const wall = new THREE.Mesh(
-    new THREE.ExtrudeGeometry(hexShape, extrudeSettings),
-    wallMat
-  );
+  return sharedCombCache;
+}
+
+export function createHexCombCell(cell: {
+  q: number;
+  r: number;
+  type: CellType;
+  fillAmount: number;
+  broodStage?: BroodStage;
+}): THREE.Group {
+  const cache = getCombCache();
+  const group = new THREE.Group();
+
+  const hexRadius = 1.0;
+  const x = hexRadius * Math.sqrt(3) * (cell.q + cell.r / 2);
+  const y = hexRadius * 1.5 * cell.r;
+  group.position.set(x, y, 0);
+
+  const wall = new THREE.Mesh(cache.wallGeo, cache.wallMat);
   wall.position.z = -1.6;
   group.add(wall);
 
   if (cell.type === 'honey') {
-    const honeyHeight = 1.4 * (cell.fillAmount / 100);
-    const honeyGeo = new THREE.CylinderGeometry(innerRadius * 0.95, innerRadius * 0.95, honeyHeight, 6);
-    honeyGeo.rotateX(Math.PI / 2);
-    const honeyMesh = new THREE.Mesh(
-      honeyGeo,
-      new THREE.MeshPhysicalMaterial({
-        color: 0xF59E0B,
-        transmission: 0.84,
-        opacity: 0.95,
-        transparent: true,
-        roughness: 0.08,
-      })
-    );
+    const honeyHeight = Math.max(0.1, 1.4 * (cell.fillAmount / 100));
+    const honeyMesh = new THREE.Mesh(cache.honeyGeo, cache.honeyMat);
+    honeyMesh.scale.z = honeyHeight;
     honeyMesh.position.z = -1.6 + honeyHeight / 2;
     group.add(honeyMesh);
 
-    // Translucent silk-wax cap if full or near-full honey
     if (cell.fillAmount >= 80) {
-      const capGeo = new THREE.CylinderGeometry(innerRadius * 0.96, innerRadius * 0.96, 0.22, 6);
-      capGeo.rotateX(Math.PI / 2);
-      const capMesh = new THREE.Mesh(
-        capGeo,
-        new THREE.MeshStandardMaterial({
-          color: 0xFEF3C7,
-          roughness: 0.68,
-        })
-      );
+      const capMesh = new THREE.Mesh(cache.capGeo, cache.capMat);
       capMesh.position.z = -0.15;
       group.add(capMesh);
     }
   } else if (cell.type === 'pollen') {
-    const pollenGeo = new THREE.CylinderGeometry(innerRadius * 0.95, innerRadius * 0.95, 1.25, 6);
-    pollenGeo.rotateX(Math.PI / 2);
-    const pollenMesh = new THREE.Mesh(
-      pollenGeo,
-      new THREE.MeshStandardMaterial({
-        color: 0xEAB308,
-        roughness: 0.92,
-      })
-    );
+    const pollenMesh = new THREE.Mesh(cache.pollenGeo, cache.pollenMat);
     pollenMesh.position.z = -0.95;
     group.add(pollenMesh);
   } else if (cell.type === 'brood') {
     if (cell.broodStage === 'egg') {
-      // Tiny pearly-white rice-grain royal egg standing upright in cell base
-      const eggGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.5, 8);
-      eggGeo.scale(1.0, 1.2, 1.0);
-      eggGeo.rotateX(Math.PI / 2);
-      const eggMat = new THREE.MeshStandardMaterial({
-        color: 0xFFFFFF,
-        roughness: 0.25,
-      });
-      const eggMesh = new THREE.Mesh(eggGeo, eggMat);
+      const eggMesh = new THREE.Mesh(cache.eggGeo, cache.eggMat);
       eggMesh.position.z = -1.35;
       group.add(eggMesh);
     } else {
-      // Pearly-white curled C-shaped grub larva
-      const larvaGeo = new THREE.SphereGeometry(innerRadius * 0.52, 14, 10);
-      larvaGeo.scale(0.85, 1.2, 0.75);
-      const larvaMesh = new THREE.Mesh(
-        larvaGeo,
-        new THREE.MeshStandardMaterial({
-          color: 0xFEF9C3,
-          roughness: 0.35,
-        })
-      );
+      const larvaMesh = new THREE.Mesh(cache.larvaGeo, cache.larvaMat);
       larvaMesh.position.z = -0.92;
       larvaMesh.rotation.z = Math.PI / 3.5;
       group.add(larvaMesh);

@@ -6,6 +6,8 @@
 import * as THREE from 'three';
 import { WeatherType } from '../types/game';
 import { audioEngine } from './audio';
+import { simWasm } from '../wasm/beeSimWasm';
+import { detectSoftwareWebGL } from './terrain';
 
 export interface WeatherController {
   currentWeather: WeatherType;
@@ -22,6 +24,7 @@ export function setupWeatherSystem(
 ): WeatherController {
   let currentWeather: WeatherType = 'sunny';
   const wind = new THREE.Vector3(0.5, 0, 0.2);
+  const isSoftwareGl = detectSoftwareWebGL();
 
   // Rain particle system
   const maxRainDrops = 140;
@@ -29,15 +32,16 @@ export function setupWeatherSystem(
   rainGeo.scale(0.8, 2.5, 0.8); // Teardrop elongation
   const rainMat = new THREE.MeshPhysicalMaterial({
     color: 0xBAE6FD,
-    transmission: 0.9,
+    transmission: isSoftwareGl ? 0 : 0.9,
     roughness: 0.1,
     transparent: true,
-    opacity: 0.75,
+    opacity: isSoftwareGl ? 0.55 : 0.75,
   });
 
   const rainMesh = new THREE.InstancedMesh(rainGeo, rainMat, maxRainDrops);
   rainMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   rainMesh.visible = false;
+  rainMesh.frustumCulled = false;
   scene.add(rainMesh);
 
   // Rain drop positions & velocities
@@ -54,6 +58,7 @@ export function setupWeatherSystem(
       vz: wind.z * 2,
     });
   }
+  simWasm.seedRain(dropData);
 
   function applyWeatherLighting(weather: WeatherType) {
     currentWeather = weather;
@@ -65,7 +70,6 @@ export function setupWeatherSystem(
       hemiLight.color.setHex(0xECFDF5);
       hemiLight.groundColor.setHex(0x27190F);
       hemiLight.intensity = 0.95;
-      // Soft atmospheric woodland haze (lush meadow tint, pushing fade far back to 750)
       scene.fog = new THREE.Fog(0xD1FAE5, 220, 750);
       rainMesh.visible = false;
       wind.set(0.4, 0, 0.2);
@@ -115,40 +119,54 @@ export function setupWeatherSystem(
     update(dt: number, playerPos: THREE.Vector3) {
       timeAcc += dt;
 
-      // Oscillate wind slightly
-      wind.x += Math.sin(timeAcc * 1.5) * 0.05 * (currentWeather === 'breezy' ? 2 : 1);
+      // Bounded gentle wind gust oscillation (avoids unbounded wind.x drift)
+      const baseWindX = currentWeather === 'breezy' ? 3.2 : currentWeather === 'rain' ? 1.8 : 0.4;
+      wind.x = baseWindX + Math.sin(timeAcc * 1.1) * (currentWeather === 'breezy' ? 1.1 : 0.3);
 
       if (currentWeather === 'rain' && rainMesh.visible) {
-        for (let i = 0; i < maxRainDrops; i++) {
-          const d = dropData[i];
-          d.y += d.vy * dt;
-          d.x += (d.vx + wind.x) * dt;
-          d.z += (d.vz + wind.z) * dt;
-
-          // If drop hits ground or falls below player
-          if (d.y < 0.2) {
-            d.y = playerPos.y + 15 + Math.random() * 15;
-            d.x = playerPos.x + (Math.random() - 0.5) * 45;
-            d.z = playerPos.z + (Math.random() - 0.5) * 45;
-          }
-
-          // Check proximity to player for splash feedback
-          const dx = d.x - playerPos.x;
-          const dy = d.y - playerPos.y;
-          const dz = d.z - playerPos.z;
-          const distSq = dx * dx + dy * dy + dz * dz;
-
-          if (distSq < 0.8) {
+        if (simWasm.getIsReady()) {
+          const splashes = simWasm.updateRain(maxRainDrops, dt, wind.x, wind.z, playerPos);
+          if (splashes > 0) {
             audioEngine.playRaindropImpact();
-            // Reset drop
-            d.y = playerPos.y + 20;
           }
+          const rainBuf = simWasm.rainFloats;
+          for (let i = 0; i < maxRainDrops; i++) {
+            const o = i * 6;
+            dummy.position.set(rainBuf[o], rainBuf[o + 1], rainBuf[o + 2]);
+            dummy.rotation.x = 0.1;
+            dummy.rotation.z = -wind.x * 0.05;
+            dummy.updateMatrix();
+            rainMesh.setMatrixAt(i, dummy.matrix);
+          }
+        } else {
+          for (let i = 0; i < maxRainDrops; i++) {
+            const d = dropData[i];
+            d.y += d.vy * dt;
+            d.x += (d.vx + wind.x) * dt;
+            d.z += (d.vz + wind.z) * dt;
 
-          dummy.position.set(d.x, d.y, d.z);
-          dummy.rotation.x = 0.1;
-          dummy.rotation.z = -wind.x * 0.05;
-          dummy.updateMatrix();
-          rainMesh.setMatrixAt(i, dummy.matrix);
+            if (d.y < 0.2) {
+              d.y = playerPos.y + 15 + Math.random() * 15;
+              d.x = playerPos.x + (Math.random() - 0.5) * 45;
+              d.z = playerPos.z + (Math.random() - 0.5) * 45;
+            }
+
+            const dx = d.x - playerPos.x;
+            const dy = d.y - playerPos.y;
+            const dz = d.z - playerPos.z;
+            const distSq = dx * dx + dy * dy + dz * dz;
+
+            if (distSq < 0.8) {
+              audioEngine.playRaindropImpact();
+              d.y = playerPos.y + 20;
+            }
+
+            dummy.position.set(d.x, d.y, d.z);
+            dummy.rotation.x = 0.1;
+            dummy.rotation.z = -wind.x * 0.05;
+            dummy.updateMatrix();
+            rainMesh.setMatrixAt(i, dummy.matrix);
+          }
         }
         rainMesh.instanceMatrix.needsUpdate = true;
       }

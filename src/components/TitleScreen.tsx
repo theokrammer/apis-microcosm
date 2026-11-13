@@ -5,7 +5,7 @@
 
 import React, { useEffect } from 'react';
 import { GameMode } from '../types/game';
-import { Sparkles, Users, Crown, Play } from 'lucide-react';
+import { Wind, Users, Crown, Play } from 'lucide-react';
 
 interface TitleScreenProps {
   onStart: (mode: GameMode) => void;
@@ -16,7 +16,8 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({ onStart }) => {
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (e.code === 'Enter' || e.code === 'Space') {
+      if ((e.code === 'Enter' || e.code === 'Space') && !e.repeat) {
+        e.preventDefault();
         onStart(selectedMode);
       }
     };
@@ -25,7 +26,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({ onStart }) => {
   }, [selectedMode, onStart]);
 
   return (
-    <div className="absolute inset-0 z-30 flex flex-col items-center justify-between p-6 md:p-12 bg-gradient-to-t from-stone-950/90 via-stone-950/40 to-stone-950/20 backdrop-blur-[2px]">
+    <div className="absolute inset-0 z-30 flex flex-col items-center justify-between p-6 md:p-12 bg-gradient-to-t from-stone-950/92 via-stone-950/45 to-stone-950/25">
       {/* Top Brand & Biological Note */}
       <div className="flex items-center gap-3 text-xs tracking-widest uppercase text-amber-400 font-semibold">
         <span>WebAssembly Physics</span>
@@ -62,13 +63,13 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({ onStart }) => {
         </p>
 
         {/* Mode Selector */}
-        <div className="mt-8 flex flex-col sm:flex-row items-center gap-3 w-full max-w-md">
+        <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl">
           <button
             onClick={() => setSelectedMode('colony_active')}
-            className={`flex-1 w-full p-4 rounded-xl border text-left transition-all cursor-pointer ${
+            className={`w-full p-4 rounded-xl border text-left transition-all cursor-pointer ${
               selectedMode === 'colony_active'
                 ? 'bg-amber-600/30 border-amber-500 text-white shadow-lg'
-                : 'bg-stone-900/60 border-stone-800 text-stone-400 hover:border-stone-700'
+                : 'bg-stone-900/75 border-stone-800 text-stone-400 hover:border-stone-700'
             }`}
           >
             <div className="flex items-center gap-2 font-bold text-sm text-stone-100">
@@ -82,10 +83,10 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({ onStart }) => {
 
           <button
             onClick={() => setSelectedMode('spring_founding')}
-            className={`flex-1 w-full p-4 rounded-xl border text-left transition-all cursor-pointer ${
+            className={`w-full p-4 rounded-xl border text-left transition-all cursor-pointer ${
               selectedMode === 'spring_founding'
                 ? 'bg-amber-600/30 border-amber-500 text-white shadow-lg'
-                : 'bg-stone-900/60 border-stone-800 text-stone-400 hover:border-stone-700'
+                : 'bg-stone-900/75 border-stone-800 text-stone-400 hover:border-stone-700'
             }`}
           >
             <div className="flex items-center gap-2 font-bold text-sm text-stone-100">
@@ -94,6 +95,23 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({ onStart }) => {
             </div>
             <div className="mt-1 text-xs text-stone-300 leading-snug">
               Emerge post-winter as a lone queen to scout a cavity, build initial comb, and lay eggs.
+            </div>
+          </button>
+
+          <button
+            onClick={() => setSelectedMode('swarm_migration')}
+            className={`w-full p-4 rounded-xl border text-left transition-all cursor-pointer ${
+              selectedMode === 'swarm_migration'
+                ? 'bg-amber-600/30 border-amber-500 text-white shadow-lg'
+                : 'bg-stone-900/75 border-stone-800 text-stone-400 hover:border-stone-700'
+            }`}
+          >
+            <div className="flex items-center gap-2 font-bold text-sm text-stone-100">
+              <Wind className="w-4 h-4 text-amber-300" />
+              <span>Swarm Migration</span>
+            </div>
+            <div className="mt-1 text-xs text-stone-300 leading-snug">
+              Lead a migrating swarm queen with loyal workers across the meadow to establish a new oak nest.
             </div>
           </button>
         </div>

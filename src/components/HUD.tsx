@@ -36,16 +36,10 @@ export const HUD: React.FC<HUDProps> = ({
     active: false,
   };
 
-  if (player.role === 'guard') {
+  if (player.role === 'guard' && player.threatWarning) {
     actionPrompt = {
       label: 'Sting Attack [Space]',
       icon: <Shield className="w-4 h-4 text-rose-400" />,
-      active: true,
-    };
-  } else if (player.nearFlowerId) {
-    actionPrompt = {
-      label: 'Sip Nectar & Pollen [Space]',
-      icon: <Sparkles className="w-4 h-4 text-amber-400" />,
       active: true,
     };
   } else if (player.nearHive && (player.nectarCarried > 0 || player.pollenCarried > 0)) {
@@ -54,14 +48,14 @@ export const HUD: React.FC<HUDProps> = ({
       icon: <Droplets className="w-4 h-4 text-amber-500" />,
       active: true,
     };
-  } else if (player.role === 'builder') {
+  } else if (player.nearFlowerId) {
     actionPrompt = {
-      label: 'Expand Comb [Space / B]',
-      icon: <Hammer className="w-4 h-4 text-yellow-300" />,
+      label: 'Sip Nectar & Pollen [Space]',
+      icon: <Sparkles className="w-4 h-4 text-amber-400" />,
       active: true,
     };
   } else if (player.role === 'queen') {
-    if (gameMode === 'spring_founding' && player.nearFoundingSite) {
+    if ((gameMode === 'spring_founding' || gameMode === 'swarm_migration') && player.nearFoundingSite) {
       actionPrompt = {
         label: 'Found New Hive [Space]',
         icon: <Crown className="w-4 h-4 text-amber-300" />,
@@ -74,6 +68,18 @@ export const HUD: React.FC<HUDProps> = ({
         active: true,
       };
     }
+  } else if (player.role === 'builder') {
+    actionPrompt = {
+      label: 'Expand Comb [Space / B]',
+      icon: <Hammer className="w-4 h-4 text-yellow-300" />,
+      active: true,
+    };
+  } else if (player.role === 'guard') {
+    actionPrompt = {
+      label: 'Sting Attack [Space]',
+      icon: <Shield className="w-4 h-4 text-rose-400" />,
+      active: true,
+    };
   }
 
   return (
@@ -84,11 +90,21 @@ export const HUD: React.FC<HUDProps> = ({
         <div className="pointer-events-auto bg-[#181410]/90 border border-amber-950/40 rounded-xl p-3.5 shadow-xl max-w-sm">
           <div className="flex items-center justify-between gap-2 mb-2 pb-1.5 border-b border-amber-900/30">
             <span className="text-xs font-semibold uppercase tracking-wider text-amber-400/90">
-              {gameMode === 'spring_founding' ? 'Founding Queen' : 'Colony Hive Vitality'}
+              {gameMode === 'spring_founding'
+                ? 'Founding Queen'
+                : gameMode === 'swarm_migration'
+                  ? 'Swarm Migration'
+                  : 'Colony Hive Vitality'}
             </span>
-            <div className="flex items-center gap-1.5 text-xs text-rose-400 font-mono">
-              <Heart className="w-3.5 h-3.5 fill-current" />
-              <span>{Math.round(player.health)}% HP</span>
+            <div className="flex items-center gap-3 text-xs font-mono">
+              <div className="flex items-center gap-1 text-rose-400">
+                <Heart className="w-3.5 h-3.5 fill-current" />
+                <span>{Math.round(player.health)}%</span>
+              </div>
+              <div className="flex items-center gap-1 text-sky-400" title="Flight Stamina">
+                <Wind className="w-3.5 h-3.5" />
+                <span>{Math.round(player.stamina)}%</span>
+              </div>
             </div>
           </div>
 
@@ -98,6 +114,9 @@ export const HUD: React.FC<HUDProps> = ({
               <div className="font-semibold text-amber-300 font-mono tabular-nums text-sm">
                 {colony.honey} <span className="text-[10px] text-amber-500 font-sans">units</span>
               </div>
+              {colony.nectar > 0 && (
+                <div className="text-[10px] text-amber-400/80 font-mono">+{colony.nectar} ripening</div>
+              )}
             </div>
             <div>
               <div className="text-stone-400 text-[11px]">Pollen</div>
@@ -172,7 +191,7 @@ export const HUD: React.FC<HUDProps> = ({
       <div className="self-center flex flex-col items-center gap-3">
         {/* Dynamic Ecological Threat Warning */}
         {player.threatWarning && (
-          <div className="pointer-events-none px-4 py-2 bg-rose-950/90 border border-rose-500/80 text-rose-200 text-xs font-extrabold rounded-xl shadow-2xl flex items-center gap-2 tracking-wide uppercase animate-pulse">
+          <div className="pointer-events-none px-4 py-2 bg-rose-950/90 border border-rose-500/80 text-rose-200 text-xs font-extrabold rounded-xl shadow-2xl flex items-center gap-2 tracking-wide uppercase">
             <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
             <span>{player.threatWarning}</span>
           </div>

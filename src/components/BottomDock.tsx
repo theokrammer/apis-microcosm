@@ -137,7 +137,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
 
       {/* Control hints */}
       <div className="mt-1 text-[11px] text-stone-400/90 font-mono tracking-tight drop-shadow">
-        WASD Flight Thrust · Space Context Action · Q/E Altitude · Shift Sprint
+        WASD Flight Thrust · Space Context Action · F Boost/Heal · Q/E Altitude · Shift Sprint
       </div>
     </div>
   );

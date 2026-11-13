@@ -44,7 +44,7 @@ export const Minimap: React.FC<MinimapProps> = ({
     <div className="pointer-events-auto flex flex-col items-end">
       {/* Radar Container */}
       <div
-        className="relative bg-[#15110D]/90 border border-amber-950/60 rounded-full shadow-2xl overflow-hidden backdrop-blur-sm"
+        className="relative bg-[#15110D]/90 border border-amber-950/60 rounded-full shadow-2xl overflow-hidden"
         style={{ width: size, height: size }}
       >
         <svg width={size} height={size} className="w-full h-full">
@@ -143,7 +143,7 @@ export const Minimap: React.FC<MinimapProps> = ({
           })}
 
           {/* Player Bee Position & Heading Arrow at Center */}
-          <g transform={`translate(${center}, ${center}) rotate(${(-playerYaw * 180) / Math.PI + 180})`}>
+          <g transform={`translate(${center}, ${center}) rotate(${(-playerYaw * 180) / Math.PI})`}>
             {/* Field of vision cone */}
             <polygon points="0,0 -16,-38 16,-38" fill="rgba(245, 158, 11, 0.12)" />
             {/* Bee glyph */}

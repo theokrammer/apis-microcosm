@@ -49,11 +49,22 @@ import {
   createGiantFern,
   createFallenMossyLog,
   createWoodlandToadstool,
+  MACRO_TEXTURES,
+  getMacroTexture,
   BeeMeshGroup,
   WaspMeshGroup,
   MantisMeshGroup,
   ButterflyMeshGroup,
 } from './proceduralModels';
+import { terrainHeightAt, detectSoftwareWebGL } from './terrain';
+
+// Pre-allocated math helpers for zero-GC per-frame updates
+const _camOffset = new THREE.Vector3();
+const _camLookAhead = new THREE.Vector3();
+const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _vecA = new THREE.Vector3();
+const _vecB = new THREE.Vector3();
+const _vecC = new THREE.Vector3();
 
 export interface GameEngineCallbacks {
   onStateUpdate: (
@@ -150,19 +161,29 @@ export class BeeGameEngine {
   private grassMaterial!: THREE.MeshStandardMaterial;
   private pollenPoints!: THREE.Points;
   private ambientBees: BeeMeshGroup[] = [];
+  private residentHiveBees: BeeMeshGroup[] = [];
   private lastStateUpdateTime: number = 0;
 
   // Biological Insect Fauna (Wasps, Mantis, Spider, Ladybugs, Butterflies)
   private insects: InsectEntity[] = [];
   private insectMeshes: Array<THREE.Group | WaspMeshGroup | MantisMeshGroup | ButterflyMeshGroup> = [];
 
-  // Hive tree position
-  private readonly hivePosition = new THREE.Vector3(0, 0, -25);
+  // Hive tree position & interior/entrance checkpoints
+  private readonly hivePosition = new THREE.Vector3(0, terrainHeightAt(0, -25), -25);
+  private readonly hiveEntrancePos = new THREE.Vector3(0, 4.5, -4.5);
+  private readonly hiveInteriorPos = new THREE.Vector3(0, 5.5, -16.0);
   private foundingSiteFound: boolean = false;
+  private healingEnergyAcc: number = 0;
+  private honeyRipenAcc: number = 0;
 
   // Camera damping helpers
   private cameraTarget = new THREE.Vector3();
   private cameraLookTarget = new THREE.Vector3();
+
+  // Bound event listeners for clean teardown
+  private onKeyDownBound?: (e: KeyboardEvent) => void;
+  private onKeyUpBound?: (e: KeyboardEvent) => void;
+  private onBlurBound?: () => void;
 
   constructor(container: HTMLDivElement, callbacks: GameEngineCallbacks, initialMode: GameMode = 'colony_active') {
     this.container = container;
@@ -170,25 +191,27 @@ export class BeeGameEngine {
     this.gameMode = initialMode;
     if (initialMode === 'spring_founding') {
       this.currentRole = 'queen';
+      this.playerState.role = 'queen';
       this.colony.honey = 15;
       this.colony.pollen = 10;
       this.colony.wax = 12;
+      this.colony.nectar = 0;
       this.colony.population = { foragers: 0, guards: 0, builders: 0, larvae: 0, eggs: 0 };
+    } else if (initialMode === 'swarm_migration') {
+      this.currentRole = 'queen';
+      this.playerState.role = 'queen';
+      this.colony.honey = 45;
+      this.colony.pollen = 30;
+      this.colony.wax = 35;
+      this.colony.nectar = 20;
+      this.colony.population = { foragers: 14, guards: 5, builders: 7, larvae: 0, eggs: 0 };
     }
   }
 
   public async init() {
     this.clock = new THREE.Clock();
 
-    const isSoftwareGl = (() => {
-      const gl = document.createElement('canvas').getContext('webgl2');
-      if (!gl) return true;
-      const ext = gl.getExtension('WEBGL_debug_renderer_info');
-      const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
-      const gpu = String(gl.getParameter(param));
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
-      return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-    })();
+    const isSoftwareGl = detectSoftwareWebGL();
 
     this.renderer = new THREE.WebGLRenderer({
       antialias: !isSoftwareGl,
@@ -211,7 +234,7 @@ export class BeeGameEngine {
 
     this.camera = new THREE.PerspectiveCamera(
       65,
-      this.container.clientWidth / this.container.clientHeight,
+      this.container.clientWidth / Math.max(1, this.container.clientHeight),
       0.1,
       850
     );
@@ -261,7 +284,7 @@ export class BeeGameEngine {
     this.spawnBiologicalFauna();
     this.spawnAmbientColonyBees();
 
-    // Register all solid immovable obstacles for WASM & Rapier physics
+    // Register all solid immovable obstacles for WASM physics
     this.registerWorldColliders();
 
     // Create Player Bee
@@ -275,13 +298,15 @@ export class BeeGameEngine {
 
     if (this.gameMode === 'spring_founding') {
       this.callbacks.onLogMessage('Spring thaw: Queen awakened. Beware of early predators while scouting a cavity!');
+    } else if (this.gameMode === 'swarm_migration') {
+      this.callbacks.onLogMessage('Swarm migration: Lead your queen to the hollow oak cavity to claim a new hive!');
     } else {
       this.callbacks.onLogMessage('Colony active: Forage floral nectar. Evade ambush mantises and fight hornets!');
     }
   }
 
   private buildTerrain() {
-    // Expansive 720x720 rolling meadow terrain basin
+    // Expansive 720x720 rolling meadow terrain basin matching terrainHeightAt(x, z)
     const groundGeo = new THREE.PlaneGeometry(720, 720, 128, 128);
     groundGeo.rotateX(-Math.PI / 2);
 
@@ -289,30 +314,11 @@ export class BeeGameEngine {
     for (let i = 0; i < posAttr.count; i++) {
       const x = posAttr.getX(i);
       const z = posAttr.getZ(i);
-      const r = Math.sqrt(x * x + z * z);
-
-      // Micro rolling earth mounds in inner meadow
-      let y = Math.sin(x * 0.04) * Math.cos(z * 0.04) * 0.75 + Math.sin(x * 0.14 + z * 0.09) * 0.25;
-
-      // Outer perimeter rises into verdant woodland hills and glade basin walls
-      if (r > 100) {
-        const hillBlend = Math.min(1.0, (r - 100) / 180);
-        const hillWave = Math.sin(Math.atan2(z, x) * 5) * 6.0 + Math.cos(r * 0.03) * 4.0;
-        y += hillBlend * hillBlend * (22.0 + hillWave);
-      }
-      posAttr.setY(i, y);
+      posAttr.setY(i, terrainHeightAt(x, z));
     }
     groundGeo.computeVertexNormals();
 
-    const textureLoader = new THREE.TextureLoader();
-
-    // Vibrant summer meadow turf with clover, grass, and buttercups
-    const turfTex = textureLoader.load('/src/assets/images/meadow_turf_macro_1793560187403.jpg');
-    turfTex.colorSpace = THREE.SRGBColorSpace;
-    turfTex.wrapS = THREE.RepeatWrapping;
-    turfTex.wrapT = THREE.RepeatWrapping;
-    turfTex.repeat.set(48, 48);
-
+    const turfTex = getMacroTexture(MACRO_TEXTURES.MEADOW_TURF, 48, 48);
     const groundMat = new THREE.MeshStandardMaterial({
       map: turfTex,
       roughness: 0.82,
@@ -323,12 +329,7 @@ export class BeeGameEngine {
     this.scene.add(ground);
 
     // Loamy soil patch around the ancient hollow hive tree roots
-    const soilTex = textureLoader.load('/src/assets/images/forest_soil_macro_1793461527125.jpg');
-    soilTex.colorSpace = THREE.SRGBColorSpace;
-    soilTex.wrapS = THREE.RepeatWrapping;
-    soilTex.wrapT = THREE.RepeatWrapping;
-    soilTex.repeat.set(6, 6);
-
+    const soilTex = getMacroTexture(MACRO_TEXTURES.SOIL, 6, 6);
     const hiveSoilGeo = new THREE.CircleGeometry(32, 24);
     hiveSoilGeo.rotateX(-Math.PI / 2);
     const hiveSoilMat = new THREE.MeshStandardMaterial({
@@ -336,13 +337,13 @@ export class BeeGameEngine {
       roughness: 0.94,
     });
     const hiveSoilPatch = new THREE.Mesh(hiveSoilGeo, hiveSoilMat);
-    hiveSoilPatch.position.set(this.hivePosition.x, 0.06, this.hivePosition.z);
+    hiveSoilPatch.position.set(this.hivePosition.x, this.hivePosition.y + 0.06, this.hivePosition.z);
     hiveSoilPatch.receiveShadow = true;
     this.scene.add(hiveSoilPatch);
 
     // Giant Garden Trowel
     const trowel = createGardenTrowel();
-    trowel.position.set(26, 0, -6);
+    trowel.position.set(26, terrainHeightAt(26, -6), -6);
     this.scene.add(trowel);
 
     // Mossy River Stones & Mounds
@@ -356,7 +357,7 @@ export class BeeGameEngine {
     ];
     stonePositions.forEach((sp) => {
       const stone = createMossyStone(sp.r);
-      stone.position.set(sp.x, 0, sp.z);
+      stone.position.set(sp.x, terrainHeightAt(sp.x, sp.z), sp.z);
       stone.rotation.y = Math.random() * Math.PI * 2;
       this.scene.add(stone);
     });
@@ -369,7 +370,7 @@ export class BeeGameEngine {
     ];
     mossPositions.forEach((mp) => {
       const mound = createMossMound(mp.r);
-      mound.position.set(mp.x, 0, mp.z);
+      mound.position.set(mp.x, terrainHeightAt(mp.x, mp.z), mp.z);
       this.scene.add(mound);
     });
 
@@ -377,28 +378,30 @@ export class BeeGameEngine {
     const tree = createTreeHollowHive();
     tree.position.copy(this.hivePosition);
     this.scene.add(tree);
+    if (Array.isArray(tree.userData.residentBees)) {
+      this.residentHiveBees = tree.userData.residentBees as BeeMeshGroup[];
+    }
 
     // Hive Comb Group inside cavity, facing forward towards the entrance
-    this.combMeshGroup.position.set(0, 5.5, -12.5);
+    this.combMeshGroup.position.set(0, this.hivePosition.y + 5.5, -12.5);
     this.combMeshGroup.rotation.y = 0;
     this.scene.add(this.combMeshGroup);
 
-    // Towering Woodland Ferns (Pikmin micro perspective)
-    const fern1 = createGiantFern(15);
-    fern1.position.set(-42, 0, 18);
-    this.scene.add(fern1);
+    // Towering Woodland Ferns
+    const fernSpawns = [
+      { x: -42, z: 18, h: 15 },
+      { x: 40, z: -22, h: 14 },
+      { x: -18, z: -52, h: 16 },
+    ];
+    fernSpawns.forEach((fs) => {
+      const fern = createGiantFern(fs.h);
+      fern.position.set(fs.x, terrainHeightAt(fs.x, fs.z), fs.z);
+      this.scene.add(fern);
+    });
 
-    const fern2 = createGiantFern(14);
-    fern2.position.set(40, 0, -22);
-    this.scene.add(fern2);
-
-    const fern3 = createGiantFern(16);
-    fern3.position.set(-18, 0, -52);
-    this.scene.add(fern3);
-
-    // Giant Fallen Mossy Log (Archway bee tunnel)
+    // Giant Fallen Mossy Log (Archway bee landmark)
     const fallenLog = createFallenMossyLog(36, 4.8);
-    fallenLog.position.set(6, 0, 42);
+    fallenLog.position.set(6, terrainHeightAt(6, 42), 42);
     this.scene.add(fallenLog);
 
     // Woodland Fly Agaric Toadstool Clusters (Amanita muscaria)
@@ -411,86 +414,110 @@ export class BeeGameEngine {
     ];
     toadstoolSpawns.forEach((ts) => {
       const shroom = createWoodlandToadstool(ts.h, ts.r);
-      shroom.position.set(ts.x, 0, ts.z);
+      shroom.position.set(ts.x, terrainHeightAt(ts.x, ts.z), ts.z);
       shroom.rotation.y = Math.random() * Math.PI * 2;
       this.scene.add(shroom);
     });
   }
 
   private buildForestBorderTrees() {
-    // Ancient Oak Trees forming perimeter
-    const oak1 = createAncientOakTree(52);
-    oak1.position.set(-60, 0, -45);
-    this.scene.add(oak1);
+    const placeTree = (tree: THREE.Group, x: number, z: number) => {
+      tree.position.set(x, terrainHeightAt(x, z), z);
+      this.scene.add(tree);
+    };
 
-    const oak2 = createAncientOakTree(50);
-    oak2.position.set(55, 0, 50);
-    this.scene.add(oak2);
-
-    // White Birch Trees with papery bark & weeping flutter leaves
-    const birch1 = createBirchTree(42);
-    birch1.position.set(45, 0, -40);
-    this.scene.add(birch1);
-
-    const birch2 = createBirchTree(38);
-    birch2.position.set(-50, 0, 35);
-    this.scene.add(birch2);
-
-    // Scots Pine Conifers with tiered needle whorls and pine cones
-    const pine1 = createScotsPineTree(48);
-    pine1.position.set(-25, 0, -65);
-    this.scene.add(pine1);
-
-    const pine2 = createScotsPineTree(44);
-    pine2.position.set(35, 0, 60);
-    this.scene.add(pine2);
+    placeTree(createAncientOakTree(52), -60, -45);
+    placeTree(createAncientOakTree(50), 55, 50);
+    placeTree(createBirchTree(42), 45, -40);
+    placeTree(createBirchTree(38), -50, 35);
+    placeTree(createScotsPineTree(48), -25, -65);
+    placeTree(createScotsPineTree(44), 35, 60);
   }
 
   private registerWorldColliders() {
-    // Register all solid immovable obstacles in Rapier3D and native WebAssembly
+    // Build hollow perimeter ring of 11 trunk wall cylinders around hive (leaving +Z entrance at PI/2 wide open)
+    const hiveWallObstacles: WorldObstacle[] = [];
+    const ringSegments = 12;
+    for (let k = 0; k < ringSegments; k++) {
+      // Skip k === 3 (angle PI/2 = (0, +20.2) -> world (0, -4.8)) so the bee can fly into the cavity!
+      if (k === 3) continue;
+      const angle = (k * Math.PI * 2) / ringSegments;
+      const wx = this.hivePosition.x + Math.cos(angle) * 20.2;
+      const wz = this.hivePosition.z + Math.sin(angle) * 20.2;
+      const gy = terrainHeightAt(wx, wz);
+      hiveWallObstacles.push({
+        id: `hive_wall_${k}`,
+        type: 'cylinder',
+        x: wx,
+        z: wz,
+        yMin: gy,
+        yMax: gy + 44,
+        radius: 3.4,
+      });
+    }
+
+    // Horizontal fallen mossy log (span 36m along X centered at x=6, z=42)
+    const logSpheres: WorldObstacle[] = [-14, -7, 0, 7, 14].map((dx, i) => {
+      const lx = 6 + dx;
+      const lz = 42;
+      const gy = terrainHeightAt(lx, lz);
+      return {
+        id: `fallen_log_${i}`,
+        type: 'sphere',
+        x: lx,
+        z: lz,
+        yMin: gy,
+        yMax: gy + 9.6,
+        radius: 4.8,
+      };
+    });
+
+    const cylObs = (id: string, x: number, z: number, height: number, radius: number): WorldObstacle => {
+      const gy = terrainHeightAt(x, z);
+      return { id, type: 'cylinder', x, z, yMin: gy, yMax: gy + height, radius };
+    };
+
+    const sphereObs = (id: string, x: number, z: number, height: number, radius: number): WorldObstacle => {
+      const gy = terrainHeightAt(x, z);
+      return { id, type: 'sphere', x, z, yMin: gy, yMax: gy + height, radius };
+    };
+
     const obstacles: WorldObstacle[] = [
-      // Hive Hollow Tree Trunk
-      { id: 'hive_tree', type: 'cylinder', x: this.hivePosition.x, z: this.hivePosition.z, yMin: 0, yMax: 44, radius: 21 },
-      // Ancient Oak Trees
-      { id: 'oak_1', type: 'cylinder', x: -60, z: -45, yMin: 0, yMax: 52, radius: 26 },
-      { id: 'oak_2', type: 'cylinder', x: 55, z: 50, yMin: 0, yMax: 50, radius: 26 },
-      // White Birch Trees
-      { id: 'birch_1', type: 'cylinder', x: 45, z: -40, yMin: 0, yMax: 42, radius: 6.5 },
-      { id: 'birch_2', type: 'cylinder', x: -50, z: 35, yMin: 0, yMax: 38, radius: 6.5 },
-      // Scots Pine Conifers
-      { id: 'pine_1', type: 'cylinder', x: -25, z: -65, yMin: 0, yMax: 48, radius: 5.0 },
-      { id: 'pine_2', type: 'cylinder', x: 35, z: 60, yMin: 0, yMax: 44, radius: 4.8 },
-      // Garden Trowel
-      { id: 'trowel', type: 'cylinder', x: 26, z: -6, yMin: 0, yMax: 16, radius: 3.0 },
-      // Fallen Mossy Nurse Log
-      { id: 'fallen_log', type: 'cylinder', x: 6, z: 42, yMin: 0, yMax: 9, radius: 4.8 },
-      // Mossy River Boulders (Spheres)
-      { id: 'stone_1', type: 'sphere', x: -14, z: 8, yMin: 0, yMax: 8, radius: 4.2 },
-      { id: 'stone_2', type: 'sphere', x: 18, z: -16, yMin: 0, yMax: 9.5, radius: 5.0 },
-      { id: 'stone_3', type: 'sphere', x: -28, z: -18, yMin: 0, yMax: 7.5, radius: 3.8 },
-      { id: 'stone_4', type: 'sphere', x: 8, z: 24, yMin: 0, yMax: 8.8, radius: 4.5 },
-      { id: 'stone_5', type: 'sphere', x: -32, z: 20, yMin: 0, yMax: 10, radius: 5.2 },
-      { id: 'stone_6', type: 'sphere', x: 34, z: -25, yMin: 0, yMax: 9.2, radius: 4.8 },
-      // Woodland Toadstools
-      { id: 'toadstool_1', type: 'cylinder', x: -14, z: -10, yMin: 0, yMax: 6.8, radius: 1.2 },
-      { id: 'toadstool_2', type: 'cylinder', x: -16, z: -7.5, yMin: 0, yMax: 4.8, radius: 1.0 },
-      { id: 'toadstool_3', type: 'cylinder', x: 14, z: 46, yMin: 0, yMax: 7.2, radius: 1.2 },
-      { id: 'toadstool_4', type: 'cylinder', x: 2, z: 38, yMin: 0, yMax: 5.5, radius: 1.0 },
-      { id: 'toadstool_5', type: 'cylinder', x: 24, z: -20, yMin: 0, yMax: 6.2, radius: 1.1 },
-      // Botanical Flower Stalks (Thick fibrous stems)
-      ...this.flowers.map((f) => ({
-        id: `flower_${f.id}`,
-        type: 'cylinder' as const,
-        x: f.position[0],
-        z: f.position[2],
-        yMin: 0,
-        yMax: Math.max(f.position[1], 6.0),
-        radius: 0.5,
-      })),
+      ...hiveWallObstacles,
+      cylObs('oak_1', -60, -45, 52, 26),
+      cylObs('oak_2', 55, 50, 50, 26),
+      cylObs('birch_1', 45, -40, 42, 6.5),
+      cylObs('birch_2', -50, 35, 38, 6.5),
+      cylObs('pine_1', -25, -65, 48, 5.0),
+      cylObs('pine_2', 35, 60, 44, 4.8),
+      cylObs('trowel', 26, -6, 16, 3.0),
+      ...logSpheres,
+      sphereObs('stone_1', -14, 8, 8, 4.2),
+      sphereObs('stone_2', 18, -16, 9.5, 5.0),
+      sphereObs('stone_3', -28, -18, 7.5, 3.8),
+      sphereObs('stone_4', 8, 24, 8.8, 4.5),
+      sphereObs('stone_5', -32, 20, 10, 5.2),
+      sphereObs('stone_6', 34, -25, 9.2, 4.8),
+      cylObs('toadstool_1', -14, -10, 6.8, 1.2),
+      cylObs('toadstool_2', -16, -7.5, 4.8, 1.0),
+      cylObs('toadstool_3', 14, 46, 7.2, 1.2),
+      cylObs('toadstool_4', 2, 38, 5.5, 1.0),
+      cylObs('toadstool_5', 24, -20, 6.2, 1.1),
+      ...this.flowers.map((f) => {
+        const gy = terrainHeightAt(f.position[0], f.position[2]);
+        return {
+          id: `flower_${f.id}`,
+          type: 'cylinder' as const,
+          x: f.position[0],
+          z: f.position[2],
+          yMin: gy,
+          yMax: Math.max(f.position[1], gy + 6.0),
+          radius: 0.5,
+        };
+      }),
     ];
 
     this.physics.setObstacles(obstacles);
-    simWasm.setObstacles(obstacles);
   }
 
   private buildDenseMeadowVegetation() {
@@ -498,13 +525,7 @@ export class BeeGameEngine {
     const grassCount = 10000;
     const bladeGeo = createCurvedGrassGeometry();
 
-    const textureLoader = new THREE.TextureLoader();
-    const grassTex = textureLoader.load('/src/assets/images/grass_blade_macro_1793462745561.jpg');
-    grassTex.colorSpace = THREE.SRGBColorSpace;
-    grassTex.wrapS = THREE.RepeatWrapping;
-    grassTex.wrapT = THREE.RepeatWrapping;
-    grassTex.repeat.set(1, 3);
-
+    const grassTex = getMacroTexture(MACRO_TEXTURES.GRASS_BLADE, 1, 3);
     this.grassMaterial = new THREE.MeshStandardMaterial({
       map: grassTex,
       roughness: 0.52,
@@ -532,7 +553,7 @@ export class BeeGameEngine {
           vec4 instPos = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
           vec2 diff = instPos.xz - uPlayerPos.xz;
           float dist = length(diff);
-          if (dist < 3.2 && uPlayerPos.y < 5.5) {
+          if (dist < 3.2 && abs(uPlayerPos.y - instPos.y) < 5.5) {
             vec2 pushDir = normalize(diff + vec2(0.001, 0.001));
             float factor = (1.0 - dist / 3.2) * (position.y / 6.5);
             transformed.x += pushDir.x * factor * 2.2;
@@ -558,15 +579,15 @@ export class BeeGameEngine {
       const x = Math.cos(angle) * radius;
       const z = Math.sin(angle) * radius;
 
-      if (x * x + (z + 25) * (z + 25) < 130) {
+      if (x * x + (z + 25) * (z + 25) < 480) {
         dummy.position.set(0, -100, 0);
+        dummy.scale.set(0.001, 0.001, 0.001);
       } else {
-        dummy.position.set(x, 0, z);
+        dummy.position.set(x, terrainHeightAt(x, z), z);
         const scaleY = 0.8 + Math.random() * 0.7;
         const scaleXZ = 0.85 + Math.random() * 0.4;
         dummy.scale.set(scaleXZ, scaleY, scaleXZ);
-        dummy.rotation.y = Math.random() * Math.PI * 2;
-        dummy.rotation.z = (Math.random() - 0.5) * 0.2;
+        dummy.rotation.set(0, Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.2);
       }
       dummy.updateMatrix();
       this.grassMesh.setMatrixAt(i, dummy.matrix);
@@ -581,11 +602,10 @@ export class BeeGameEngine {
     this.grassMesh.receiveShadow = true;
     this.scene.add(this.grassMesh);
 
-    // 1,500 Clover Groundcover Leaflets with photorealistic botanical leaf macro
+    // 1,500 Clover Groundcover Leaflets aligned to terrainHeightAt
     const cloverCount = 1500;
     const cloverLeafGeo = new THREE.CircleGeometry(0.85, 8);
-    const cloverTex = textureLoader.load('/src/assets/images/botanical_leaf_macro_1793462790946.jpg');
-    cloverTex.colorSpace = THREE.SRGBColorSpace;
+    const cloverTex = getMacroTexture(MACRO_TEXTURES.BOTANICAL_LEAF, 1, 1);
     const cloverMat = new THREE.MeshStandardMaterial({
       map: cloverTex,
       roughness: 0.65,
@@ -596,10 +616,16 @@ export class BeeGameEngine {
     for (let i = 0; i < cloverCount; i++) {
       const r = 5 + Math.random() * 80;
       const a = Math.random() * Math.PI * 2;
-      dummy.position.set(Math.cos(a) * r, 0.08, Math.sin(a) * r);
-      dummy.rotation.x = -Math.PI / 2 + (Math.random() - 0.5) * 0.3;
-      dummy.rotation.z = Math.random() * Math.PI * 2;
-      dummy.scale.setScalar(0.7 + Math.random() * 0.6);
+      const cx = Math.cos(a) * r;
+      const cz = Math.sin(a) * r;
+      if (cx * cx + (cz + 25) * (cz + 25) < 420) {
+        dummy.position.set(0, -100, 0);
+        dummy.scale.set(0.001, 0.001, 0.001);
+      } else {
+        dummy.position.set(cx, terrainHeightAt(cx, cz) + 0.08, cz);
+        dummy.rotation.set(-Math.PI / 2 + (Math.random() - 0.5) * 0.3, 0, Math.random() * Math.PI * 2);
+        dummy.scale.setScalar(0.7 + Math.random() * 0.6);
+      }
       dummy.updateMatrix();
       groundCloverMesh.setMatrixAt(i, dummy.matrix);
     }
@@ -618,7 +644,7 @@ export class BeeGameEngine {
       { type: 'clover', x: -18, z: 10, height: 9.5 },
       { type: 'clover', x: -30, z: -8, height: 11.0 },
       { type: 'clover', x: 16, z: 20, height: 10.0 },
-      { type: 'dandelion', x: 10, z: -4, height: 12.0, hasSpider: true }, // Crab spider hidden in dandelion!
+      { type: 'dandelion', x: 10, z: -4, height: 12.0, hasSpider: true },
       { type: 'dandelion', x: -10, z: 26, height: 12.5 },
       { type: 'seedhead', x: 28, z: -16, height: 13.0 },
       { type: 'seedhead', x: -4, z: -14, height: 11.5 },
@@ -642,7 +668,8 @@ export class BeeGameEngine {
       else if (cfg.type === 'thistle') flowerMesh = createWildThistle(cfg.height);
       else flowerMesh = createLavenderSpike(cfg.height);
 
-      flowerMesh.position.set(cfg.x, 0, cfg.z);
+      const groundY = terrainHeightAt(cfg.x, cfg.z);
+      flowerMesh.position.set(cfg.x, groundY, cfg.z);
       flowerMesh.rotation.y = Math.random() * Math.PI * 2;
       this.scene.add(flowerMesh);
       this.flowerMeshes.push(flowerMesh);
@@ -650,12 +677,12 @@ export class BeeGameEngine {
       // Add Crab Spider on flower if configured
       if (cfg.hasSpider) {
         const spider = createProceduralSpider();
-        spider.position.set(cfg.x, cfg.height + 0.3, cfg.z);
+        spider.position.set(cfg.x, groundY + cfg.height + 0.3, cfg.z);
         this.scene.add(spider);
         this.insects.push({
           id: `spider_${idx}`,
           type: 'spider',
-          position: [cfg.x, cfg.height + 0.3, cfg.z],
+          position: [cfg.x, groundY + cfg.height + 0.3, cfg.z],
           velocity: [0, 0, 0],
           health: 60,
           state: 'stalking',
@@ -666,7 +693,7 @@ export class BeeGameEngine {
       this.flowers.push({
         id: `flower_${idx}`,
         type: cfg.type,
-        position: [cfg.x, cfg.height, cfg.z],
+        position: [cfg.x, groundY + cfg.height, cfg.z],
         nectar: 100,
         pollen: 100,
         petalColor: cfg.type === 'clover' ? 0xE11D48 : cfg.type === 'poppy' ? 0xE11D48 : 0xFACC15,
@@ -708,6 +735,9 @@ export class BeeGameEngine {
       positions[i * 3 + 2] = (Math.random() - 0.5) * 80;
     }
 
+    // Seed WASM pollen buffer so particles start distributed across the meadow
+    simWasm.seedPollen(positions);
+
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
@@ -727,8 +757,8 @@ export class BeeGameEngine {
   private spawnBiologicalFauna() {
     // 1. Predatory Wasps (Hornet raiders)
     const waspPositions = [
-      new THREE.Vector3(-24, 7, 12),
-      new THREE.Vector3(18, 9, -4),
+      new THREE.Vector3(-24, terrainHeightAt(-24, 12) + 7, 12),
+      new THREE.Vector3(18, terrainHeightAt(18, -4) + 9, -4),
     ];
     waspPositions.forEach((pos, idx) => {
       const waspMesh = createProceduralWasp();
@@ -744,11 +774,13 @@ export class BeeGameEngine {
         health: 100,
         state: 'stalking',
         target: idx === 0 ? 'hive' : 'player',
+        animTimer: 0,
       });
     });
 
-    // 2. Praying Mantis (Ambush predator perched on tall thistle/clover)
-    const mantisPos = new THREE.Vector3(-36, 10.5, 14);
+    // 2. Praying Mantis (Ambush predator perched on tall thistle)
+    const mantisY = terrainHeightAt(-36, 14) + 10.5;
+    const mantisPos = new THREE.Vector3(-36, mantisY, 14);
     const mantisMesh = createProceduralMantis();
     mantisMesh.position.copy(mantisPos);
     mantisMesh.rotation.y = -Math.PI / 3;
@@ -763,12 +795,13 @@ export class BeeGameEngine {
       health: 140,
       state: 'stalking',
       target: 'player',
+      animTimer: 0,
     });
 
     // 3. Ladybugs (Neutral crawling beetles)
     const ladybugPositions = [
-      new THREE.Vector3(-12, 1.2, 8),
-      new THREE.Vector3(16, 2.5, -14),
+      new THREE.Vector3(-12, terrainHeightAt(-12, 8) + 0.35, 8),
+      new THREE.Vector3(16, terrainHeightAt(16, -14) + 0.35, -14),
     ];
     ladybugPositions.forEach((lPos, idx) => {
       const lb = createProceduralLadybug();
@@ -788,8 +821,8 @@ export class BeeGameEngine {
 
     // 4. Swallowtail Butterflies (Neutral pollinators fluttering between blossoms)
     const bflyPositions = [
-      new THREE.Vector3(8, 12, 18),
-      new THREE.Vector3(-20, 14, -10),
+      new THREE.Vector3(8, terrainHeightAt(8, 18) + 12, 18),
+      new THREE.Vector3(-20, terrainHeightAt(-20, -10) + 14, -10),
     ];
     bflyPositions.forEach((bPos, idx) => {
       const bfly = createProceduralButterfly();
@@ -809,14 +842,16 @@ export class BeeGameEngine {
   }
 
   private spawnAmbientColonyBees() {
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 6; i++) {
       const bee = createProceduralBee('forager');
       bee.scale.setScalar(0.75);
       bee.position.set(
         (Math.random() - 0.5) * 6,
-        3.5 + Math.random() * 3,
-        -18 + (Math.random() - 0.5) * 5
+        this.hivePosition.y + 4.0 + Math.random() * 2,
+        -5.0 + (Math.random() - 0.5) * 4
       );
+      bee.userData.phaseOffset = i * 1.37;
+      bee.userData.flowerIdx = i % Math.max(1, this.flowers.length);
       this.scene.add(bee);
       this.ambientBees.push(bee);
     }
@@ -863,8 +898,7 @@ export class BeeGameEngine {
 
   private renderCombMeshes() {
     while (this.combMeshGroup.children.length > 0) {
-      const child = this.combMeshGroup.children[0];
-      this.combMeshGroup.remove(child);
+      this.combMeshGroup.remove(this.combMeshGroup.children[0]);
     }
 
     this.combCells.forEach((cell) => {
@@ -873,25 +907,67 @@ export class BeeGameEngine {
     });
   }
 
+  private disposeObjectHierarchy(root: THREE.Object3D) {
+    root.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.geometry) {
+        mesh.geometry.dispose();
+      }
+      const mat = mesh.material;
+      if (Array.isArray(mat)) {
+        mat.forEach((m) => this.disposeMaterialAndTextures(m));
+      } else if (mat) {
+        this.disposeMaterialAndTextures(mat);
+      }
+    });
+  }
+
+  private disposeMaterialAndTextures(mat: THREE.Material) {
+    const std = mat as THREE.MeshStandardMaterial;
+    if (std.map) std.map.dispose();
+    if (std.normalMap) std.normalMap.dispose();
+    if (std.roughnessMap) std.roughnessMap.dispose();
+    mat.dispose();
+  }
+
   private spawnPlayerBee() {
     if (this.playerBeeMesh) {
       this.scene.remove(this.playerBeeMesh);
+      this.disposeObjectHierarchy(this.playerBeeMesh);
     }
 
     this.playerBeeMesh = createProceduralBee(this.currentRole);
+    this.syncPollenBasketScale();
     this.scene.add(this.playerBeeMesh);
+  }
 
-    if (this.gameMode === 'spring_founding') {
-      this.physics.setPosition(10, 2.5, 18);
-    } else {
-      // Spawn right on the established hive landing board facing outward toward the meadow
-      this.physics.setPosition(0, 3.8, -2.5);
-    }
+  private syncPollenBasketScale() {
+    if (!this.playerBeeMesh?.pollenBaskets) return;
+    const ratio = this.playerState.pollenCarried / 20;
+    const pScale = ratio > 0 ? 0.45 + ratio * 0.85 : 0.01;
+    this.playerBeeMesh.pollenBaskets.forEach((b) => b.scale.set(pScale, pScale, pScale));
+  }
+
+  private clearInputs() {
+    this.inputState.forward = false;
+    this.inputState.backward = false;
+    this.inputState.left = false;
+    this.inputState.right = false;
+    this.inputState.up = false;
+    this.inputState.down = false;
+    this.inputState.sprint = false;
+    this.inputState.actionPrimary = false;
+    this.inputState.actionSecondary = false;
   }
 
   private setupInputs() {
-    const onKeyDown = (e: KeyboardEvent) => {
+    this.onKeyDownBound = (e: KeyboardEvent) => {
+      if (this.isPaused || this.isDestroyed) return;
       audioEngine.ensureRunning();
+
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+        e.preventDefault();
+      }
 
       switch (e.code) {
         case 'KeyW':
@@ -921,27 +997,30 @@ export class BeeGameEngine {
           this.inputState.sprint = true;
           break;
         case 'Space':
-          this.executeContextAction();
+          if (!e.repeat) this.executeContextAction();
+          break;
+        case 'KeyF':
+          if (!e.repeat) this.executeSecondaryAction();
           break;
         case 'Digit1':
-          this.switchRole('forager');
+          if (!e.repeat) this.switchRole('forager');
           break;
         case 'Digit2':
-          this.switchRole('guard');
+          if (!e.repeat) this.switchRole('guard');
           break;
         case 'Digit3':
-          this.switchRole('builder');
+          if (!e.repeat) this.switchRole('builder');
           break;
         case 'Digit4':
-          this.switchRole('queen');
+          if (!e.repeat) this.switchRole('queen');
           break;
         case 'KeyB':
-          this.buildNewCombCell();
+          if (!e.repeat) this.buildNewCombCell();
           break;
       }
     };
 
-    const onKeyUp = (e: KeyboardEvent) => {
+    this.onKeyUpBound = (e: KeyboardEvent) => {
       switch (e.code) {
         case 'KeyW':
         case 'ArrowUp':
@@ -972,8 +1051,13 @@ export class BeeGameEngine {
       }
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
+    this.onBlurBound = () => {
+      this.clearInputs();
+    };
+
+    window.addEventListener('keydown', this.onKeyDownBound);
+    window.addEventListener('keyup', this.onKeyUpBound);
+    window.addEventListener('blur', this.onBlurBound);
   }
 
   public switchRole(role: BeeRole) {
@@ -992,6 +1076,36 @@ export class BeeGameEngine {
 
   public setGameMode(mode: GameMode) {
     this.gameMode = mode;
+    this.clearInputs();
+
+    this.playerState.health = 100;
+    this.playerState.stamina = 100;
+    this.playerState.nectarCarried = 0;
+    this.playerState.pollenCarried = 0;
+    this.playerState.threatWarning = null;
+    this.playerState.stingingCooldown = 0;
+
+    // Replenish flowers & reset predator positions
+    this.flowers.forEach((f) => {
+      f.nectar = 100;
+      f.pollen = 100;
+      if (f.id === 'flower_3') f.hasSpider = true;
+    });
+    this.insects.forEach((ins, idx) => {
+      if (ins.type === 'wasp') {
+        ins.health = 100;
+        ins.animTimer = 0;
+        const wx = idx % 2 === 0 ? -24 : 18;
+        const wz = idx % 2 === 0 ? 12 : -4;
+        ins.position = [wx, terrainHeightAt(wx, wz) + 8, wz];
+      } else if (ins.type === 'mantis') {
+        ins.health = 140;
+        ins.animTimer = 0;
+      } else if (ins.type === 'spider') {
+        ins.health = 60;
+      }
+    });
+
     if (mode === 'colony_active') {
       this.currentRole = 'forager';
       this.playerState.role = 'forager';
@@ -999,6 +1113,7 @@ export class BeeGameEngine {
       this.colony.pollen = 60;
       this.colony.wax = 45;
       this.colony.nectar = 40;
+      this.colony.hiveWarmth = 90;
       this.colony.population = {
         foragers: 20,
         guards: 8,
@@ -1006,11 +1121,28 @@ export class BeeGameEngine {
         larvae: 8,
         eggs: 6,
       };
+      this.foundingSiteFound = true;
       this.buildInitialComb();
-      this.combMeshGroup.position.set(0, 5.5, -12.5);
+      this.combMeshGroup.position.set(0, this.hivePosition.y + 5.5, -12.5);
       this.combMeshGroup.rotation.y = 0;
       this.spawnPlayerBee();
+      this.physics.setPosition(0, this.hivePosition.y + 3.8, -2.5, 0);
       this.callbacks.onLogMessage('Colony simulation: Established hive thriving! Forage floral nectar, tend brood, or defend against hornets.');
+    } else if (mode === 'swarm_migration') {
+      this.currentRole = 'queen';
+      this.playerState.role = 'queen';
+      this.colony.honey = 45;
+      this.colony.pollen = 30;
+      this.colony.wax = 35;
+      this.colony.nectar = 20;
+      this.colony.hiveWarmth = 78;
+      this.colony.population = { foragers: 14, guards: 5, builders: 7, larvae: 0, eggs: 0 };
+      this.combCells = [];
+      this.renderCombMeshes();
+      this.foundingSiteFound = false;
+      this.spawnPlayerBee();
+      this.physics.setPosition(22, terrainHeightAt(22, 28) + 4.0, 28, Math.PI * 0.25);
+      this.callbacks.onLogMessage('Swarm migration: Guide the swarm queen to the hollow oak cavity to establish a new colony!');
     } else {
       this.currentRole = 'queen';
       this.playerState.role = 'queen';
@@ -1018,106 +1150,210 @@ export class BeeGameEngine {
       this.colony.pollen = 10;
       this.colony.wax = 12;
       this.colony.nectar = 0;
+      this.colony.hiveWarmth = 68;
       this.colony.population = { foragers: 0, guards: 0, builders: 0, larvae: 0, eggs: 0 };
       this.combCells = [];
       this.renderCombMeshes();
       this.foundingSiteFound = false;
       this.spawnPlayerBee();
-      this.callbacks.onLogMessage('Spring thaw: Queen awakened. Beware of early predators while scouting a cavity!');
+      this.physics.setPosition(10, terrainHeightAt(10, 18) + 2.5, 18, 0.2);
+      this.callbacks.onLogMessage('Spring thaw: Queen awakened. Beware of early predators while scouting the oak cavity!');
     }
+  }
+
+  private getNearestPredatorDistance(maxDist: number): InsectEntity | null {
+    const pPos = this.playerBeeMesh.position;
+    for (const ins of this.insects) {
+      if (ins.type === 'wasp' || ins.type === 'mantis' || ins.type === 'spider') {
+        _vecA.set(ins.position[0], ins.position[1], ins.position[2]);
+        if (pPos.distanceTo(_vecA) < maxDist) {
+          return ins;
+        }
+      }
+    }
+    return null;
+  }
+
+  public executeSecondaryAction() {
+    audioEngine.ensureRunning();
+    if (this.playerState.nearHive && this.playerState.health < 100 && this.colony.honey >= 2) {
+      this.colony.honey -= 2;
+      this.playerState.health = Math.min(100, this.playerState.health + 25);
+      audioEngine.playNectarSip();
+      this.callbacks.onLogMessage('Sipped royal honey from hive stores (+25 HP).');
+      return;
+    }
+    if (this.playerState.stamina < 95 && this.playerState.nectarCarried >= 5) {
+      this.playerState.nectarCarried -= 5;
+      this.playerState.stamina = Math.min(100, this.playerState.stamina + 45);
+      audioEngine.playNectarSip();
+      this.callbacks.onLogMessage('Consumed floral nectar for flight energy (+45 Stamina).');
+      return;
+    }
+    this.callbacks.onLogMessage('Secondary [F]: Heal near hive with honey or convert carried nectar to stamina.');
   }
 
   public executeContextAction() {
     audioEngine.ensureRunning();
 
-    // 1. Guard Combat Attack
-    if (this.currentRole === 'guard') {
+    // 1. Guard Combat Attack (when predator in range or not near hive deposit/flower)
+    const predatorNear = this.getNearestPredatorDistance(6.0);
+    if (this.currentRole === 'guard' && predatorNear) {
       this.executeStingAttack();
       return;
     }
 
-    // 2. Forager Nectar & Pollen Gathering
+    // 2. Deposit at Hive (works for any caste carrying nectar/pollen)
+    if (this.playerState.nearHive && (this.playerState.nectarCarried > 0 || this.playerState.pollenCarried > 0)) {
+      const rawNectar = this.playerState.nectarCarried;
+      const immediateHoney = Math.round(rawNectar * 0.4);
+      const ripeningNectar = rawNectar - immediateHoney;
+      const waxGain = Math.max(1, Math.round(rawNectar * 0.25));
+
+      this.colony.honey += immediateHoney;
+      this.colony.nectar += ripeningNectar;
+      this.colony.pollen += this.playerState.pollenCarried;
+      this.colony.wax += waxGain;
+
+      // Visually fill available empty comb cells
+      let combUpdated = false;
+      if (rawNectar > 0) {
+        const emptyHoneyCell = this.combCells.find((c) => c.type === 'empty');
+        if (emptyHoneyCell) {
+          emptyHoneyCell.type = 'honey';
+          emptyHoneyCell.fillAmount = Math.min(100, 65 + rawNectar);
+          combUpdated = true;
+        }
+      }
+      if (this.playerState.pollenCarried > 0) {
+        const emptyPollenCell = this.combCells.find((c) => c.type === 'empty');
+        if (emptyPollenCell) {
+          emptyPollenCell.type = 'pollen';
+          emptyPollenCell.fillAmount = 90;
+          combUpdated = true;
+        }
+      }
+      if (combUpdated) this.renderCombMeshes();
+
+      this.callbacks.onLogMessage(
+        `Deposited: +${immediateHoney} Honey, +${ripeningNectar} Raw Nectar, +${this.playerState.pollenCarried} Pollen, +${waxGain} Wax!`
+      );
+
+      this.playerState.nectarCarried = 0;
+      this.playerState.pollenCarried = 0;
+      this.syncPollenBasketScale();
+      audioEngine.playCombBuild();
+      return;
+    }
+
+    // 3. Floral Nectar & Pollen Gathering
     if (this.playerState.nearFlowerId) {
       const flower = this.flowers.find((f) => f.id === this.playerState.nearFlowerId);
       if (flower && (flower.nectar > 0 || flower.pollen > 0)) {
-        // Crab spider check!
         if (flower.hasSpider) {
-          this.playerState.health = Math.max(10, this.playerState.health - 20);
-          audioEngine.playStingAttack();
-          this.callbacks.onLogMessage('CRAB SPIDER AMBUSH! Escaped petal trap with sprint [SHIFT]!');
+          this.applyPlayerDamage(22, 'CRAB SPIDER AMBUSH! Evaded petal trap — spider scattered!');
           flower.hasSpider = false;
+          const spider = this.insects.find((ins) => ins.type === 'spider');
+          if (spider) {
+            spider.health = 0;
+            spider.position[1] = -50;
+          }
           return;
         }
 
-        const sipNectar = Math.min(flower.nectar, 10);
-        const gatherPollen = Math.min(flower.pollen, 6);
+        const sipNectar = Math.min(flower.nectar, 10, 30 - this.playerState.nectarCarried);
+        const gatherPollen = Math.min(flower.pollen, 6, 20 - this.playerState.pollenCarried);
+
+        if (sipNectar === 0 && gatherPollen === 0) {
+          this.callbacks.onLogMessage('Pollen baskets full! Return to the hive entrance to deposit.');
+          return;
+        }
 
         flower.nectar -= sipNectar;
         flower.pollen -= gatherPollen;
         this.playerState.nectarCarried = Math.min(30, this.playerState.nectarCarried + sipNectar);
         this.playerState.pollenCarried = Math.min(20, this.playerState.pollenCarried + gatherPollen);
-
-        if (this.playerBeeMesh.pollenBaskets) {
-          const pScale = 0.5 + (this.playerState.pollenCarried / 20) * 0.85;
-          this.playerBeeMesh.pollenBaskets.forEach((b) => b.scale.set(pScale, pScale, pScale));
-        }
+        this.syncPollenBasketScale();
 
         audioEngine.playNectarSip();
         this.callbacks.onLogMessage(`Gathered ${sipNectar} nectar & ${gatherPollen} pollen from ${flower.type}!`);
         return;
-      }
-    }
-
-    // 3. Deposit at Hive
-    if (this.playerState.nearHive) {
-      if (this.playerState.nectarCarried > 0 || this.playerState.pollenCarried > 0) {
-        const honeyGain = Math.round(this.playerState.nectarCarried * 0.8);
-        this.colony.honey += honeyGain;
-        this.colony.pollen += this.playerState.pollenCarried;
-        this.colony.wax += Math.round(honeyGain * 0.25);
-
-        this.callbacks.onLogMessage(
-          `Deposited resources: +${honeyGain} Honey, +${this.playerState.pollenCarried} Pollen, +${Math.round(honeyGain * 0.25)} Wax!`
-        );
-
-        this.playerState.nectarCarried = 0;
-        this.playerState.pollenCarried = 0;
-        if (this.playerBeeMesh.pollenBaskets) {
-          this.playerBeeMesh.pollenBaskets.forEach((b) => b.scale.set(0.01, 0.01, 0.01));
-        }
-        audioEngine.playCombBuild();
+      } else if (flower) {
+        this.callbacks.onLogMessage(`${flower.type} is depleted and regenerating nectar...`);
         return;
       }
     }
 
     // 4. Queen Founding / Egg Laying
     if (this.currentRole === 'queen') {
-      if (this.gameMode === 'spring_founding' && !this.foundingSiteFound) {
+      if ((this.gameMode === 'spring_founding' || this.gameMode === 'swarm_migration') && !this.foundingSiteFound) {
         if (this.playerState.nearFoundingSite) {
           this.foundingSiteFound = true;
           this.buildInitialFoundingComb();
-          this.callbacks.onLogMessage('Founding cavity claimed! Built initial honeypot and wax cell.');
+          return;
+        } else {
+          this.callbacks.onLogMessage('Fly inside or onto the hollow oak landing board to claim the cavity.');
           return;
         }
       }
 
-      const emptyCell = this.combCells.find((c) => c.type === 'empty');
-      if (emptyCell && this.playerState.nearHive) {
-        emptyCell.type = 'brood';
-        emptyCell.broodStage = 'egg';
-        emptyCell.broodTimer = 10;
-        this.colony.population.eggs++;
-        this.renderCombMeshes();
-        audioEngine.playEggLay();
-        this.callbacks.onLogMessage('Queen laid a royal egg into an empty honeycomb cell.');
-        return;
+      if (this.playerState.nearHive) {
+        const emptyCell = this.combCells.find((c) => c.type === 'empty');
+        if (emptyCell) {
+          emptyCell.type = 'brood';
+          emptyCell.broodStage = 'egg';
+          emptyCell.broodTimer = 10;
+          this.colony.population.eggs++;
+          this.renderCombMeshes();
+          audioEngine.playEggLay();
+          this.callbacks.onLogMessage('Queen laid a royal egg into an empty honeycomb cell.');
+          return;
+        } else {
+          this.callbacks.onLogMessage('No empty comb cells available — switch to Builder [3] and expand comb [B]!');
+          return;
+        }
       }
     }
 
     // 5. Builder: Honeycomb construction
     if (this.currentRole === 'builder') {
       this.buildNewCombCell();
+      return;
     }
+
+    // 6. Guard fallback sting
+    if (this.currentRole === 'guard') {
+      this.executeStingAttack();
+    }
+  }
+
+  private findNextHexSpiralCoord(): { q: number; r: number } {
+    const occupied = new Set(this.combCells.map((c) => `${c.q},${c.r}`));
+    if (!occupied.has('0,0')) return { q: 0, r: 0 };
+
+    const dirs: Array<[number, number]> = [
+      [1, 0],
+      [1, -1],
+      [0, -1],
+      [-1, 0],
+      [-1, 1],
+      [0, 1],
+    ];
+
+    for (let ring = 1; ring <= 8; ring++) {
+      let q = -ring;
+      let r = ring;
+      for (let side = 0; side < 6; side++) {
+        for (let step = 0; step < ring; step++) {
+          if (!occupied.has(`${q},${r}`)) {
+            return { q, r };
+          }
+          q += dirs[side][0];
+          r += dirs[side][1];
+        }
+      }
+    }
+    return { q: this.combCells.length, r: 0 };
   }
 
   public buildNewCombCell() {
@@ -1126,9 +1362,7 @@ export class BeeGameEngine {
       return;
     }
 
-    const nextQ = (this.combCells.length % 4) - 1;
-    const nextR = Math.floor(this.combCells.length / 4);
-
+    const { q: nextQ, r: nextR } = this.findNextHexSpiralCoord();
     this.colony.wax -= 8;
     this.combCells.push({
       q: nextQ,
@@ -1146,44 +1380,97 @@ export class BeeGameEngine {
     this.combCells = [
       { q: 0, r: 0, type: 'honey', fillAmount: 90 },
       { q: 1, r: 0, type: 'brood', fillAmount: 100, broodStage: 'egg', broodTimer: 8 },
+      { q: 0, r: -1, type: 'empty', fillAmount: 0 },
+      { q: -1, r: 0, type: 'empty', fillAmount: 0 },
     ];
+    this.combMeshGroup.position.set(0, this.hivePosition.y + 5.5, -12.5);
+    this.combMeshGroup.rotation.y = 0;
     this.renderCombMeshes();
     this.gameMode = 'colony_active';
-    this.callbacks.onLogMessage('Colony established! First brood nurtured.');
+    audioEngine.playCombBuild();
+    this.callbacks.onLogMessage('Cavity claimed & colony established! First honeypot and brood comb constructed.');
   }
 
   private executeStingAttack() {
+    if (this.playerState.stingingCooldown > 0) return;
+    this.playerState.stingingCooldown = 0.45;
     audioEngine.playStingAttack();
 
     const playerPos = this.playerBeeMesh.position;
-    for (const insect of this.insects) {
-      if (insect.type === 'wasp') {
-        const iPos = new THREE.Vector3(insect.position[0], insect.position[1], insect.position[2]);
-        if (playerPos.distanceTo(iPos) < 5.5) {
-          insect.health -= 45;
-          this.callbacks.onLogMessage(`Stinger strike hit predator wasp! (HP: ${Math.max(0, insect.health)})`);
+    let hitAny = false;
 
-          const knock = iPos.clone().sub(playerPos).normalize().multiplyScalar(12);
-          insect.position[0] += knock.x * 0.4;
-          insect.position[1] += knock.y * 0.4;
-          insect.position[2] += knock.z * 0.4;
+    for (const insect of this.insects) {
+      if (insect.type === 'wasp' || insect.type === 'mantis' || insect.type === 'spider') {
+        _vecA.set(insect.position[0], insect.position[1], insect.position[2]);
+        if (playerPos.distanceTo(_vecA) < 6.0) {
+          hitAny = true;
+          const damage = insect.type === 'wasp' ? 45 : 35;
+          insect.health -= damage;
+
+          if (insect.type === 'wasp') {
+            _vecB.copy(_vecA).sub(playerPos);
+            if (_vecB.lengthSq() > 0.001) _vecB.normalize();
+            insect.position[0] += _vecB.x * 4.5;
+            insect.position[1] += _vecB.y * 2.0;
+            insect.position[2] += _vecB.z * 4.5;
+          }
 
           if (insect.health <= 0) {
-            this.callbacks.onLogMessage('Predator wasp repelled from the colony!');
-            insect.position[0] = (Math.random() - 0.5) * 120;
-            insect.position[1] = 15;
-            insect.position[2] = (Math.random() - 0.5) * 120;
-            insect.health = 100;
+            this.callbacks.onLogMessage(`Repelled ${insect.type} from the meadow!`);
+            if (insect.type === 'wasp') {
+              const angle = Math.random() * Math.PI * 2;
+              const rx = Math.cos(angle) * 75;
+              const rz = Math.sin(angle) * 75;
+              insect.position = [rx, terrainHeightAt(rx, rz) + 14, rz];
+              insect.health = 100;
+            } else {
+              insect.position[1] = -50;
+            }
+          } else {
+            this.callbacks.onLogMessage(`Stinger strike hit ${insect.type}! (HP: ${insect.health})`);
           }
           break;
         }
       }
     }
+
+    if (!hitAny) {
+      this.callbacks.onLogMessage('Stinger strike missed — get closer (< 6m) to a wasp or mantis!');
+    }
+  }
+
+  private applyPlayerDamage(amount: number, reasonLog?: string) {
+    this.playerState.health = Math.max(0, this.playerState.health - amount);
+    audioEngine.playStingAttack();
+
+    if (this.playerState.health <= 0) {
+      this.handlePlayerDefeat();
+    } else if (reasonLog) {
+      this.callbacks.onLogMessage(reasonLog);
+    }
+  }
+
+  private handlePlayerDefeat() {
+    this.playerState.health = 100;
+    this.playerState.stamina = 100;
+    this.playerState.nectarCarried = 0;
+    this.playerState.pollenCarried = 0;
+    this.playerState.threatWarning = null;
+    this.syncPollenBasketScale();
+
+    if (this.colony.honey >= 5) {
+      this.colony.honey -= 5;
+    }
+
+    this.physics.setPosition(0, this.hivePosition.y + 3.8, -2.5, 0);
+    this.clearInputs();
+    this.callbacks.onLogMessage('Defeated by predator! Carried back to the hive landing board (-5 Honey).');
   }
 
   public setPaused(paused: boolean) {
     this.isPaused = paused;
     if (paused) {
+      this.clearInputs();
       audioEngine.updateFlight(0, false, this.currentRole);
     }
   }
@@ -1193,6 +1480,7 @@ export class BeeGameEngine {
 
     const rawDt = this.clock.getDelta();
     const dt = Math.min(rawDt, 0.05);
+    const elapsed = this.clock.getElapsedTime();
 
     if (this.isPaused) {
       // Atmospheric slow panoramic camera pan while on Main Menu
@@ -1208,20 +1496,32 @@ export class BeeGameEngine {
       return;
     }
 
-    const pState = this.physics.update(dt, this.inputState);
+    // Stamina drain & recovery
+    const isActivelySprinting =
+      this.inputState.sprint && (this.inputState.forward || this.inputState.up) && this.playerState.stamina > 0;
+    if (isActivelySprinting) {
+      this.playerState.stamina = Math.max(0, this.playerState.stamina - dt * 22);
+    } else {
+      const regenRate = this.playerState.nearHive ? 30 : 15;
+      this.playerState.stamina = Math.min(100, this.playerState.stamina + dt * regenRate);
+    }
 
-    // Audio & tactile feedback for immovable obstacle collisions
+    if (this.playerState.stingingCooldown > 0) {
+      this.playerState.stingingCooldown = Math.max(0, this.playerState.stingingCooldown - dt);
+    }
+
+    const canSprint = this.playerState.stamina > 1.0;
+    const pState = this.physics.update(dt, this.inputState, canSprint);
+
     if (pState.hasCollidedObstacle) {
       audioEngine.playChitinThud(pState.lastImpactSpeed);
     }
 
-    // Audio feedback for brushing through meadow grass stalks
     audioEngine.updateGrassRustle(pState.speed, pState.isInGrass);
 
-    // Update grass parting vertex shader uniforms so grass parts dynamically around the bee
     if (this.grassMaterial?.userData?.uPlayerPos?.value) {
       this.grassMaterial.userData.uPlayerPos.value.copy(pState.position);
-      this.grassMaterial.userData.uTime.value = this.clock.getElapsedTime();
+      this.grassMaterial.userData.uTime.value = elapsed;
     }
 
     this.playerBeeMesh.position.copy(pState.position);
@@ -1249,7 +1549,7 @@ export class BeeGameEngine {
 
     this.weatherCtrl.update(dt, pState.position);
 
-    // High-performance particle simulation in WebAssembly (0 GC, native SIMD speed)
+    // High-performance particle simulation in WebAssembly
     if (this.pollenPoints) {
       const posAttr = this.pollenPoints.geometry.attributes.position as THREE.BufferAttribute;
       if (simWasm.getIsReady()) {
@@ -1268,63 +1568,119 @@ export class BeeGameEngine {
       posAttr.needsUpdate = true;
     }
 
-    this.ambientBees.forEach((aBee, idx) => {
-      aBee.wingPhase = (aBee.wingPhase || 0) + dt * 50;
-      if (aBee.leftWing && aBee.rightWing) {
-        aBee.leftWing.rotation.z = -0.5 + Math.sin(aBee.wingPhase) * 0.4;
-        aBee.rightWing.rotation.z = 0.5 - Math.sin(aBee.wingPhase) * 0.4;
+    // Animate resident guard & fanner bees at the hive landing board
+    this.residentHiveBees.forEach((rBee, rIdx) => {
+      const rate = rIdx === 2 ? 68 : 44; // Fanner fans wings faster to ventilate comb
+      rBee.wingPhase = (rBee.wingPhase || 0) + dt * rate;
+      const flap = Math.sin(rBee.wingPhase) * 0.42;
+      if (rBee.leftWing && rBee.rightWing) {
+        rBee.leftWing.rotation.z = -0.5 + flap;
+        rBee.rightWing.rotation.z = 0.5 - flap;
       }
-      const time = this.clock.getElapsedTime() + idx * 2;
-      aBee.position.x = Math.sin(time * 0.8) * 3;
-      aBee.position.y = 3.5 + Math.cos(time * 1.2) * 1.2;
+      if (rIdx < 2) {
+        rBee.position.y = 3.4 + Math.sin(elapsed * 2.4 + rIdx * Math.PI) * 0.14;
+      }
     });
 
-    // Check Flower Proximity
+    // Animate foraging ambient bees flying looping paths between hive entrance and meadow flowers
+    this.ambientBees.forEach((aBee, idx) => {
+      aBee.wingPhase = (aBee.wingPhase || 0) + dt * 52;
+      if (aBee.leftWing && aBee.rightWing) {
+        const flap = Math.sin(aBee.wingPhase) * 0.4;
+        aBee.leftWing.rotation.z = -0.5 + flap;
+        aBee.rightWing.rotation.z = 0.5 - flap;
+      }
+      const phaseOffset = Number(aBee.userData.phaseOffset ?? idx * 1.3);
+      const flowerIdx = Number(aBee.userData.flowerIdx ?? idx) % Math.max(1, this.flowers.length);
+      const targetFlower = this.flowers[flowerIdx];
+      if (targetFlower) {
+        const cycle = (elapsed * 0.12 + phaseOffset * 0.18) % 1.0;
+        // Triangle wave 0 -> 1 -> 0 between hive entrance and flower top
+        const t = cycle < 0.5 ? cycle * 2.0 : (1.0 - cycle) * 2.0;
+        const smoothT = t * t * (3.0 - 2.0 * t);
+
+        const nextX = THREE.MathUtils.lerp(this.hiveEntrancePos.x + (idx - 2.5) * 0.9, targetFlower.position[0], smoothT);
+        const nextZ = THREE.MathUtils.lerp(this.hiveEntrancePos.z, targetFlower.position[2], smoothT);
+        const arcLift = Math.sin(smoothT * Math.PI) * 4.5;
+        const nextY = THREE.MathUtils.lerp(this.hiveEntrancePos.y, targetFlower.position[1] + 0.8, smoothT) + arcLift;
+
+        const dx = nextX - aBee.position.x;
+        const dz = nextZ - aBee.position.z;
+        if (dx * dx + dz * dz > 0.0001) {
+          aBee.rotation.y = Math.atan2(-dx, -dz);
+        }
+        aBee.position.set(nextX, nextY, nextZ);
+      }
+    });
+
+    // Check Flower Proximity & regenerate flower nectar/pollen
     let nearFlowerId: string | null = null;
     for (const f of this.flowers) {
-      const fPos = new THREE.Vector3(f.position[0], f.position[1], f.position[2]);
-      if (pState.position.distanceTo(fPos) < 4.5) {
+      f.nectar = Math.min(100, f.nectar + dt * 2.0);
+      f.pollen = Math.min(100, f.pollen + dt * 1.4);
+
+      _vecA.set(f.position[0], f.position[1], f.position[2]);
+      if (pState.position.distanceTo(_vecA) < 4.5) {
         nearFlowerId = f.id;
-        break;
       }
     }
 
+    const distToEntrance = pState.position.distanceTo(this.hiveEntrancePos);
+    const distToInterior = pState.position.distanceTo(this.hiveInteriorPos);
+    const isNearHive =
+      distToEntrance < 9.5 ||
+      (distToInterior < 17.5 && pState.position.y < this.hivePosition.y + 16.0);
+
     this.playerState.nearFlowerId = nearFlowerId;
-    this.playerState.nearHive = distToHive < 12.0;
-    this.playerState.nearFoundingSite = pState.position.distanceTo(this.hivePosition) < 14.0;
+    this.playerState.nearHive = isNearHive;
+    this.playerState.nearFoundingSite = isNearHive || distToHive < 22.0;
     this.playerState.speed = Math.round(pState.speed * 10) / 10;
     this.playerState.altitude = Math.round(pState.altitude * 10) / 10;
     this.playerState.position = [pState.position.x, pState.position.y, pState.position.z];
-    const euler = new THREE.Euler().setFromQuaternion(pState.rotation, 'YXZ');
-    this.playerState.yaw = euler.y;
+    _euler.setFromQuaternion(pState.rotation, 'YXZ');
+    this.playerState.yaw = _euler.y;
 
-    // Biological Insects AI update (Wasps, Mantis, Butterflies)
-    this.updateBiologicalInsects(dt, pState.position);
+    // Gentle hive healing while resting at hive
+    if (isNearHive && this.playerState.health < 100 && this.colony.honey > 0) {
+      this.playerState.health = Math.min(100, this.playerState.health + dt * 6.0);
+      this.healingEnergyAcc += dt * 6.0;
+      if (this.healingEnergyAcc >= 10.0) {
+        this.healingEnergyAcc -= 10.0;
+        this.colony.honey = Math.max(0, this.colony.honey - 1);
+      }
+    }
 
-    this.updateColonyBrood(dt);
+    // Biological Insects AI update
+    this.updateBiologicalInsects(dt, elapsed, pState.position);
 
-    // Camera
-    const cameraOffset = new THREE.Vector3(0, 2.4, 6.0).applyQuaternion(pState.rotation);
-    this.cameraTarget.copy(pState.position).add(cameraOffset);
+    // Colony Brood, Nectar Ripening, & Warmth
+    this.updateColonySimulation(dt);
+
+    // Camera tracking (zero allocations)
+    _camOffset.set(0, 2.4, 6.0).applyQuaternion(pState.rotation);
+    this.cameraTarget.copy(pState.position).add(_camOffset);
     this.camera.position.lerp(this.cameraTarget, dt * 5.5);
 
-    const lookAhead = new THREE.Vector3(0, 0.4, -4.0).applyQuaternion(pState.rotation);
-    this.cameraLookTarget.copy(pState.position).add(lookAhead);
+    _camLookAhead.set(0, 0.4, -4.0).applyQuaternion(pState.rotation);
+    this.cameraLookTarget.copy(pState.position).add(_camLookAhead);
     this.camera.lookAt(this.cameraLookTarget);
 
-    const targetFOV = this.inputState.sprint ? 74 : 65;
-    this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFOV, 4.0, dt);
-    this.camera.updateProjectionMatrix();
+    const targetFOV = isActivelySprinting ? 74 : 65;
+    const nextFov = THREE.MathUtils.damp(this.camera.fov, targetFOV, 4.0, dt);
+    if (Math.abs(nextFov - this.camera.fov) > 0.01) {
+      this.camera.fov = nextFov;
+      this.camera.updateProjectionMatrix();
+    }
 
     this.renderer.render(this.scene, this.camera);
 
-    // Throttle React HUD state updates to 15 Hz to eliminate main thread UI contention
+    // Throttle React HUD state updates to 15 Hz
     const now = performance.now();
     if (now - this.lastStateUpdateTime > 66) {
       this.lastStateUpdateTime = now;
       this.callbacks.onStateUpdate(
         { ...this.playerState },
-        { ...this.colony },
+        { ...this.colony, population: { ...this.colony.population } },
         this.gameMode,
         this.weatherCtrl.currentWeather,
         this.flowers,
@@ -1336,77 +1692,97 @@ export class BeeGameEngine {
     this.frameId = requestAnimationFrame(this.tick);
   };
 
-  private updateBiologicalInsects(dt: number, playerPos: THREE.Vector3) {
+  private updateBiologicalInsects(dt: number, elapsed: number, playerPos: THREE.Vector3) {
     let warning: string | null = null;
 
     this.insects.forEach((insect, idx) => {
       const mesh = this.insectMeshes[idx];
-      if (!mesh) return;
+      if (!mesh || insect.health <= 0) {
+        if (mesh && insect.health <= 0) mesh.visible = false;
+        return;
+      }
+      mesh.visible = true;
 
-      const iPos = new THREE.Vector3(insect.position[0], insect.position[1], insect.position[2]);
-      const distToPlayer = playerPos.distanceTo(iPos);
+      _vecA.set(insect.position[0], insect.position[1], insect.position[2]);
+      const distToPlayer = playerPos.distanceTo(_vecA);
 
-      // 1. WASP / HORNET (Aerial combat or raid)
+      // 1. WASP / HORNET (Aerial predator & hive raider)
       if (insect.type === 'wasp') {
         const wMesh = mesh as WaspMeshGroup;
-        const time = this.clock.getElapsedTime() + idx * 4.0;
+        const time = elapsed + idx * 4.0;
+        insect.animTimer = Math.max(0, (insect.animTimer || 0) - dt);
 
-        if (distToPlayer < 6.0) {
-          // Maintain standoff combat distance (>= 4.2m) - never overlap or flicker behind player!
-          const pushAway = iPos.clone().sub(playerPos);
-          pushAway.y = 0;
-          if (pushAway.length() > 0.01) pushAway.normalize();
-
-          if (distToPlayer < 4.2) {
-            iPos.addScaledVector(pushAway, dt * 5.5);
+        if (distToPlayer < 12.0) {
+          // Approach or orbit at striking range (3.2m - 5.5m)
+          _vecB.copy(playerPos).sub(_vecA);
+          const dist = _vecB.length();
+          if (dist > 3.6) {
+            _vecB.normalize();
+            _vecA.addScaledVector(_vecB, dt * 6.2);
           } else {
-            const tangent = new THREE.Vector3(-pushAway.z, 0.1, pushAway.x);
-            iPos.addScaledVector(tangent, dt * 3.5);
+            // Orbit around player and periodically dive-sting
+            _vecC.set(-_vecB.z, 0.2, _vecB.x).normalize();
+            _vecA.addScaledVector(_vecC, dt * 4.0);
           }
-          wMesh.lookAt(playerPos);
 
-          if (this.currentRole !== 'guard') {
-            warning = 'HORNET DETECTED! SWITCH TO GUARD [2] TO STING!';
+          // Orient head (-Z) toward player
+          wMesh.rotation.y = Math.atan2(-(playerPos.x - _vecA.x), -(playerPos.z - _vecA.z));
+
+          if (distToPlayer < 4.5 && insect.animTimer <= 0) {
+            insect.animTimer = 2.0;
+            const dmg = this.currentRole === 'guard' ? 8 : 14;
+            this.applyPlayerDamage(dmg, 'Hornet sting hit you! Switch to Guard [2] & press [Space] to fight back!');
+          }
+
+          if (!warning) {
+            warning =
+              this.currentRole === 'guard'
+                ? 'HORNET IN RANGE! PRESS [SPACE] TO STING!'
+                : 'HORNET DETECTED! SWITCH TO GUARD [2] TO STING!';
           }
         } else {
-          // Smooth wide circular territory patrol
+          // Circular territory patrol; raid hive entrance if idx === 0
           const patrolAngle = time * 0.35;
-          const targetX = (idx === 0 ? 0 : 20) + Math.cos(patrolAngle) * 18;
-          const targetZ = (idx === 0 ? -22 : 6) + Math.sin(patrolAngle) * 18;
-          const targetY = 7.5 + Math.sin(time * 0.7) * 1.5;
+          const centerX = idx === 0 ? 0 : 20;
+          const centerZ = idx === 0 ? -10 : 6;
+          const targetX = centerX + Math.cos(patrolAngle) * 16;
+          const targetZ = centerZ + Math.sin(patrolAngle) * 16;
+          const targetY = terrainHeightAt(targetX, targetZ) + 7.5 + Math.sin(time * 0.7) * 1.5;
 
-          const targetVec = new THREE.Vector3(targetX, targetY, targetZ);
-          const dir = targetVec.clone().sub(iPos);
-          if (dir.length() > 0.5) {
-            dir.normalize();
-            iPos.addScaledVector(dir, dt * 4.0);
-            wMesh.lookAt(targetVec);
+          _vecB.set(targetX - _vecA.x, targetY - _vecA.y, targetZ - _vecA.z);
+          if (_vecB.lengthSq() > 0.25) {
+            _vecB.normalize();
+            _vecA.addScaledVector(_vecB, dt * 4.5);
+            wMesh.rotation.y = Math.atan2(-_vecB.x, -_vecB.z);
           }
         }
 
-        insect.position = [iPos.x, iPos.y, iPos.z];
-        mesh.position.copy(iPos);
+        insect.position[0] = _vecA.x;
+        insect.position[1] = _vecA.y;
+        insect.position[2] = _vecA.z;
+        mesh.position.copy(_vecA);
 
         wMesh.wingPhase = (wMesh.wingPhase || 0) + dt * 60;
         if (wMesh.leftWing && wMesh.rightWing) {
-          wMesh.leftWing.rotation.z = -0.5 + Math.sin(wMesh.wingPhase) * 0.4;
-          wMesh.rightWing.rotation.z = 0.5 - Math.sin(wMesh.wingPhase) * 0.4;
+          const flap = Math.sin(wMesh.wingPhase) * 0.4;
+          wMesh.leftWing.rotation.z = -0.5 + flap;
+          wMesh.rightWing.rotation.z = 0.5 - flap;
         }
       }
 
       // 2. PRAYING MANTIS (Ambush Predator)
       else if (insect.type === 'mantis') {
         const mantisMesh = mesh as MantisMeshGroup;
-        // Head tracks player when nearby
-        if (distToPlayer < 9.0) {
+        insect.animTimer = Math.max(0, (insect.animTimer || 0) - dt);
+
+        if (distToPlayer < 9.5) {
           if (mantisMesh.head) {
             mantisMesh.head.lookAt(playerPos);
           }
 
-          if (distToPlayer < 5.0) {
+          if (distToPlayer < 5.5) {
             warning = 'MANTIS AMBUSH! EVADE WITH SPRINT [SHIFT]!';
 
-            // Raptorial strike animation
             mantisMesh.strikeProgress = Math.min(1.0, (mantisMesh.strikeProgress || 0) + dt * 4.0);
             if (mantisMesh.leftArm && mantisMesh.rightArm) {
               const strikeAngle = Math.sin(mantisMesh.strikeProgress * Math.PI) * 1.2;
@@ -1414,10 +1790,9 @@ export class BeeGameEngine {
               mantisMesh.rightArm.rotation.x = strikeAngle;
             }
 
-            // If player doesn't evade with sprint, take damage!
-            if (distToPlayer < 3.2 && !this.inputState.sprint) {
-              this.playerState.health = Math.max(15, this.playerState.health - dt * 25);
-              audioEngine.playStingAttack();
+            if (distToPlayer < 3.4 && !this.inputState.sprint && insect.animTimer <= 0) {
+              insect.animTimer = 0.75;
+              this.applyPlayerDamage(18, 'Mantis strike hit! Hold [Shift] to evade!');
             }
           } else {
             mantisMesh.strikeProgress = 0;
@@ -1432,33 +1807,64 @@ export class BeeGameEngine {
         const flap = Math.sin(bfly.wingPhase) * 0.85;
 
         if (bfly.leftWing && bfly.rightWing) {
-          bfly.leftWing.rotation.z = flap;
-          bfly.rightWing.rotation.z = -flap;
+          bfly.leftWing.rotation.z = -flap;
+          bfly.rightWing.rotation.z = flap;
         }
 
-        // Sinusoidal flower hovering loop
-        const time = this.clock.getElapsedTime() + idx * 3;
-        iPos.x += Math.sin(time * 0.6) * dt * 3.0;
-        iPos.y += Math.cos(time * 1.5) * dt * 1.5;
-        iPos.z += Math.cos(time * 0.8) * dt * 2.5;
-        insect.position = [iPos.x, iPos.y, iPos.z];
-        mesh.position.copy(iPos);
+        const time = elapsed + idx * 3;
+        const vx = Math.sin(time * 0.6) * 3.0;
+        const vy = Math.cos(time * 1.5) * 1.5;
+        const vz = Math.cos(time * 0.8) * 2.5;
+        _vecA.x += vx * dt;
+        _vecA.y = Math.max(terrainHeightAt(_vecA.x, _vecA.z) + 3.0, _vecA.y + vy * dt);
+        _vecA.z += vz * dt;
+        bfly.rotation.y = Math.atan2(-vx, -vz);
+
+        insect.position[0] = _vecA.x;
+        insect.position[1] = _vecA.y;
+        insect.position[2] = _vecA.z;
+        mesh.position.copy(_vecA);
       }
 
       // 4. LADYBUG (Slow crawl on grass/stone)
       else if (insect.type === 'ladybug') {
-        const time = this.clock.getElapsedTime() + idx;
-        iPos.y = Math.max(0.2, insect.position[1] + Math.sin(time * 0.4) * 0.05);
-        mesh.position.copy(iPos);
+        const time = elapsed + idx;
+        _vecA.y = terrainHeightAt(_vecA.x, _vecA.z) + 0.35 + Math.sin(time * 0.8) * 0.03;
+        mesh.position.copy(_vecA);
       }
     });
 
     this.playerState.threatWarning = warning;
   }
 
-  private updateColonyBrood(dt: number) {
+  private updateColonySimulation(dt: number) {
     let combChanged = false;
 
+    // 1. Dynamic Hive Warmth based on weather & population
+    const weatherTemp =
+      this.weatherCtrl.currentWeather === 'rain'
+        ? 68
+        : this.weatherCtrl.currentWeather === 'spring_thaw'
+          ? 74
+          : this.weatherCtrl.currentWeather === 'breezy'
+            ? 84
+            : 92;
+    const popBonus = Math.min(12, (this.colony.population.foragers + this.colony.population.builders) * 0.4);
+    const targetWarmth = Math.min(100, Math.max(45, weatherTemp + popBonus - 6));
+    this.colony.hiveWarmth = Math.round(THREE.MathUtils.damp(this.colony.hiveWarmth, targetWarmth, 0.5, dt));
+
+    // 2. Ripen Raw Nectar into Honey inside warm hive
+    if (this.colony.nectar > 0 && this.colony.hiveWarmth >= 50) {
+      this.honeyRipenAcc += dt * 1.4;
+      if (this.honeyRipenAcc >= 1.0) {
+        const units = Math.min(this.colony.nectar, Math.floor(this.honeyRipenAcc));
+        this.honeyRipenAcc -= units;
+        this.colony.nectar -= units;
+        this.colony.honey += units;
+      }
+    }
+
+    // 3. Brood Maturation Lifecycle
     this.combCells.forEach((cell) => {
       if (cell.type === 'brood' && cell.broodTimer !== undefined) {
         cell.broodTimer -= dt;
@@ -1488,7 +1894,7 @@ export class BeeGameEngine {
 
   private onResize = () => {
     if (!this.container) return;
-    this.camera.aspect = this.container.clientWidth / this.container.clientHeight;
+    this.camera.aspect = this.container.clientWidth / Math.max(1, this.container.clientHeight);
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
   };
@@ -1500,8 +1906,22 @@ export class BeeGameEngine {
   public dispose() {
     this.isDestroyed = true;
     cancelAnimationFrame(this.frameId);
+
     window.removeEventListener('resize', this.onResize);
+    if (this.onKeyDownBound) window.removeEventListener('keydown', this.onKeyDownBound);
+    if (this.onKeyUpBound) window.removeEventListener('keyup', this.onKeyUpBound);
+    if (this.onBlurBound) window.removeEventListener('blur', this.onBlurBound);
+
     this.weatherCtrl?.dispose();
+
+    if (this.scene) {
+      this.disposeObjectHierarchy(this.scene);
+      if (this.scene.environment) {
+        this.scene.environment.dispose();
+        this.scene.environment = null;
+      }
+    }
+
     this.renderer?.dispose();
   }
 }

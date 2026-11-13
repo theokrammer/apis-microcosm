@@ -80,6 +80,26 @@ export class BeeSimWasmEngine {
     }
   }
 
+  public seedPollen(positions: Float32Array): void {
+    if (!this.isReady || !this.pollenFloats) return;
+    this.pollenFloats.set(positions.subarray(0, this.pollenFloats.length));
+  }
+
+  public seedRain(drops: Array<{ x: number; y: number; z: number; vx: number; vy: number; vz: number }>): void {
+    if (!this.isReady || !this.rainFloats) return;
+    const count = Math.min(drops.length, 140);
+    for (let i = 0; i < count; i++) {
+      const o = i * 6;
+      const d = drops[i];
+      this.rainFloats[o] = d.x;
+      this.rainFloats[o + 1] = d.y;
+      this.rainFloats[o + 2] = d.z;
+      this.rainFloats[o + 3] = d.vx;
+      this.rainFloats[o + 4] = d.vy;
+      this.rainFloats[o + 5] = d.vz;
+    }
+  }
+
   public updatePollen(count: number, dt: number, windX: number): void {
     if (!this.isReady || !this.wasmInstance) return;
     this.wasmInstance.updatePollen(count, dt, windX);

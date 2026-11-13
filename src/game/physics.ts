@@ -1,7 +1,7 @@
-import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 import { FlightInputState } from '../types/game';
 import { simWasm } from '../wasm/beeSimWasm';
+import { terrainHeightAt } from './terrain';
 
 export interface WorldObstacle {
   id: string;
@@ -26,21 +26,33 @@ export interface PhysicsState {
   lastImpactSpeed: number;
 }
 
-export class BeePhysicsEngine {
-  private rapier: typeof RAPIER | null = null;
-  private world: RAPIER.World | null = null;
-  private playerBody: RAPIER.RigidBody | null = null;
-  private isWasmReady: boolean = false;
+// Pre-allocated math helpers for zero-GC per-frame updates
+const _forward = new THREE.Vector3();
+const _targetHorizVel = new THREE.Vector3();
 
-  // Immovable environment colliders (trees, rocks, stems, trowel, hive)
+export class BeePhysicsEngine {
+  // Immovable environment colliders (trees, rocks, stems, trowel, hive walls)
   private obstacles: WorldObstacle[] = [];
-  private beeRadius: number = 0.38;
+  private readonly beeRadius: number = 0.38;
+  private readonly maxArenaRadius: number = 108;
 
   // Flight kinematics & state
-  private pos = new THREE.Vector3(0, 4.5, 8);
+  private pos = new THREE.Vector3(0, 3.8, -2.5);
   private vel = new THREE.Vector3(0, 0, 0);
   private quat = new THREE.Quaternion();
   private euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+  private readonly stateSnapshot: PhysicsState = {
+    position: this.pos,
+    velocity: this.vel,
+    rotation: this.quat,
+    speed: 0,
+    altitude: 0,
+    isGrounded: false,
+    isInGrass: false,
+    hasCollidedObstacle: false,
+    lastImpactSpeed: 0,
+  };
 
   // Flight parameters
   private readonly maxForwardSpeed = 15.0;
@@ -52,70 +64,19 @@ export class BeePhysicsEngine {
   public setObstacles(obstacles: WorldObstacle[]) {
     this.obstacles = obstacles;
     simWasm.setObstacles(obstacles);
-
-    // If Rapier is initialized, also register static colliders
-    if (this.isWasmReady && this.world && this.rapier) {
-      for (const obs of obstacles) {
-        if (obs.type === 'cylinder') {
-          const halfHeight = (obs.yMax - obs.yMin) / 2;
-          const centerY = obs.yMin + halfHeight;
-          const colDesc = this.rapier.ColliderDesc.cylinder(halfHeight, obs.radius)
-            .setTranslation(obs.x, centerY, obs.z);
-          this.world.createCollider(colDesc);
-        } else if (obs.type === 'sphere') {
-          const colDesc = this.rapier.ColliderDesc.ball(obs.radius)
-            .setTranslation(obs.x, (obs.yMin + obs.yMax) / 2, obs.z);
-          this.world.createCollider(colDesc);
-        }
-      }
-    }
   }
 
   public async init(): Promise<boolean> {
-    try {
-      await RAPIER.init();
-      this.rapier = RAPIER;
-
-      // Gravity scaled for small insect aerodynamics (0 in mid-air hover mode)
-      const gravity = new RAPIER.Vector3(0.0, 0.0, 0.0);
-      this.world = new RAPIER.World(gravity);
-
-      // Ground plane collider at Y = 0
-      const groundColliderDesc = RAPIER.ColliderDesc.cuboid(240.0, 0.5, 240.0).setTranslation(0, -0.5, 0);
-      this.world.createCollider(groundColliderDesc);
-
-      // Player Bee RigidBody (Kinematic position-based or high-damping dynamic)
-      const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
-        .setTranslation(this.pos.x, this.pos.y, this.pos.z)
-        .setLinearDamping(4.0)
-        .setAngularDamping(5.0)
-        .setCanSleep(false);
-
-      this.playerBody = this.world.createRigidBody(bodyDesc);
-      const beeColliderDesc = RAPIER.ColliderDesc.ball(this.beeRadius).setRestitution(0.1);
-      this.world.createCollider(beeColliderDesc, this.playerBody);
-
-      this.isWasmReady = true;
-
-      // Register any obstacles that were added before WASM finished initializing
-      if (this.obstacles.length > 0) {
-        this.setObstacles(this.obstacles);
-      }
-
-      return true;
-    } catch (e) {
-      console.warn('Rapier3D WASM init fallback to Euler physics:', e);
-      this.isWasmReady = false;
-      return false;
-    }
+    return simWasm.getIsReady();
   }
 
-  public update(dt: number, input: FlightInputState): PhysicsState {
+  public update(dt: number, input: FlightInputState, canSprint: boolean = true): PhysicsState {
     const clampedDt = Math.min(dt, 0.05);
     this.hoverTime += clampedDt;
 
-    // Check if within meadow grass layer (Y <= 3.2m in meadow field)
-    const isInGrass = this.pos.y <= 3.2;
+    const groundY = terrainHeightAt(this.pos.x, this.pos.z);
+    // Check if within meadow grass layer (<= 3.2m above local ground)
+    const isInGrass = this.pos.y - groundY <= 3.2;
 
     // 1. Heading Rotation (Yaw) & Banking (Roll)
     let yawDelta = 0;
@@ -145,26 +106,26 @@ export class BeePhysicsEngine {
 
     this.quat.setFromEuler(this.euler);
 
-    // Forward and upward orientation vectors
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.quat);
+    // Forward vector without allocations
+    _forward.set(0, 0, -1).applyQuaternion(this.quat);
 
     // 3. Thrust Calculations
+    const isSprinting = input.sprint && canSprint;
     let targetSpeed = 0;
-    if (input.forward) targetSpeed += this.maxForwardSpeed * (input.sprint ? this.sprintMultiplier : 1.0);
+    if (input.forward) targetSpeed += this.maxForwardSpeed * (isSprinting ? this.sprintMultiplier : 1.0);
     if (input.backward) targetSpeed -= this.maxForwardSpeed * 0.5;
 
-    // Horizontal target velocity
-    const targetHorizVel = forward.clone().multiplyScalar(targetSpeed);
+    _targetHorizVel.copy(_forward).multiplyScalar(targetSpeed);
 
     // Apply grass aerodynamic drag if flying low in meadow grass
     if (isInGrass) {
-      targetHorizVel.multiplyScalar(0.72); // 28% reduction in top speed through stalks
+      _targetHorizVel.multiplyScalar(0.72); // 28% reduction in top speed through stalks
     }
 
-    // 4. Vertical Altitude Control (CRITICAL: ZERO PHANTOM RISING)
+    // 4. Vertical Altitude Control
     let targetVy = 0;
     if (input.up) {
-      targetVy = this.verticalSpeed * (input.sprint ? 1.3 : 1.0);
+      targetVy = this.verticalSpeed * (isSprinting ? 1.3 : 1.0);
     } else if (input.down) {
       targetVy = -this.verticalSpeed;
     } else {
@@ -173,9 +134,9 @@ export class BeePhysicsEngine {
     }
 
     // Blend current velocity toward target velocity smoothly
-    const accelRate = (input.forward || input.backward) ? 4.5 : 6.0;
-    this.vel.x = THREE.MathUtils.damp(this.vel.x, targetHorizVel.x, accelRate, clampedDt);
-    this.vel.z = THREE.MathUtils.damp(this.vel.z, targetHorizVel.z, accelRate, clampedDt);
+    const accelRate = input.forward || input.backward ? 4.5 : 6.0;
+    this.vel.x = THREE.MathUtils.damp(this.vel.x, _targetHorizVel.x, accelRate, clampedDt);
+    this.vel.z = THREE.MathUtils.damp(this.vel.z, _targetHorizVel.z, accelRate, clampedDt);
     this.vel.y = THREE.MathUtils.damp(this.vel.y, targetVy, 6.0, clampedDt);
 
     // Dynamic grass friction drag & turbulence ("knock me off the path")
@@ -192,23 +153,40 @@ export class BeePhysicsEngine {
       if (currentHorizSpeed > 0.6) {
         this.euler.z += (Math.random() - 0.5) * 0.08;
         this.euler.y += (Math.random() - 0.5) * 0.04;
+        this.quat.setFromEuler(this.euler);
       }
     }
 
     // 5. Integrate Position
     this.pos.addScaledVector(this.vel, clampedDt);
 
-    // Hard ground clamp & ceiling limit
-    if (this.pos.y < 0.45) {
-      this.pos.y = 0.45;
+    // Terrain-following ground clamp & ceiling limit
+    const newGroundY = terrainHeightAt(this.pos.x, this.pos.z);
+    if (this.pos.y < newGroundY + 0.45) {
+      this.pos.y = newGroundY + 0.45;
       if (this.vel.y < 0) this.vel.y = 0;
     }
-    if (this.pos.y > 32.0) {
-      this.pos.y = 32.0;
+    if (this.pos.y > 36.0) {
+      this.pos.y = 36.0;
       if (this.vel.y > 0) this.vel.y = 0;
     }
 
-    // 6. Immovable Obstacle Collisions via Native WebAssembly
+    // Soft natural meadow boundary wall before distant woodland perimeter
+    const horizDistSq = this.pos.x * this.pos.x + this.pos.z * this.pos.z;
+    if (horizDistSq > this.maxArenaRadius * this.maxArenaRadius) {
+      const horizDist = Math.sqrt(horizDistSq);
+      const nx = this.pos.x / horizDist;
+      const nz = this.pos.z / horizDist;
+      this.pos.x = nx * this.maxArenaRadius;
+      this.pos.z = nz * this.maxArenaRadius;
+      const vDotN = this.vel.x * nx + this.vel.z * nz;
+      if (vDotN > 0) {
+        this.vel.x -= vDotN * nx;
+        this.vel.z -= vDotN * nz;
+      }
+    }
+
+    // 6. Immovable Obstacle Collisions via Native WebAssembly (with JS fallback)
     let hasCollidedObstacle = false;
     let lastImpactSpeed = 0;
 
@@ -282,51 +260,31 @@ export class BeePhysicsEngine {
       }
     }
 
-    // 7. Sync with Rapier WASM if active
-    if (this.isWasmReady && this.world && this.playerBody && this.rapier) {
-      this.playerBody.setTranslation(new this.rapier.Vector3(this.pos.x, this.pos.y, this.pos.z), true);
-      this.playerBody.setLinvel(new this.rapier.Vector3(this.vel.x, this.vel.y, this.vel.z), true);
-      const rQuat = new this.rapier.Quaternion(this.quat.x, this.quat.y, this.quat.z, this.quat.w);
-      this.playerBody.setRotation(rQuat, true);
-
-      this.world.timestep = clampedDt;
-      this.world.step();
-    }
-
     const currentSpeed = Math.sqrt(this.vel.x * this.vel.x + this.vel.z * this.vel.z);
-    const altitude = Math.max(0, this.pos.y);
-    const isGrounded = altitude <= 0.6;
+    const altitude = Math.max(0, this.pos.y - newGroundY);
+    const isGrounded = altitude <= 0.65;
 
-    return {
-      position: this.pos.clone(),
-      velocity: this.vel.clone(),
-      rotation: this.quat.clone(),
-      speed: currentSpeed,
-      altitude,
-      isGrounded,
-      isInGrass,
-      hasCollidedObstacle,
-      lastImpactSpeed,
-    };
+    this.stateSnapshot.speed = currentSpeed;
+    this.stateSnapshot.altitude = altitude;
+    this.stateSnapshot.isGrounded = isGrounded;
+    this.stateSnapshot.isInGrass = isInGrass;
+    this.stateSnapshot.hasCollidedObstacle = hasCollidedObstacle;
+    this.stateSnapshot.lastImpactSpeed = lastImpactSpeed;
+
+    return this.stateSnapshot;
   }
 
-  public setPosition(x: number, y: number, z: number) {
-    this.pos.set(x, y, z);
+  public setPosition(x: number, y: number, z: number, yaw?: number) {
+    const minY = terrainHeightAt(x, z) + 0.45;
+    this.pos.set(x, Math.max(y, minY), z);
     this.vel.set(0, 0, 0);
-    if (this.playerBody && this.rapier) {
-      this.playerBody.setTranslation(new this.rapier.Vector3(x, y, z), true);
-      this.playerBody.setLinvel(new this.rapier.Vector3(0, 0, 0), true);
+    if (yaw !== undefined) {
+      this.euler.set(0, yaw, 0, 'YXZ');
+      this.quat.setFromEuler(this.euler);
     }
   }
 
   public applyImpulse(impulse: THREE.Vector3) {
     this.vel.add(impulse);
-    if (this.playerBody && this.rapier) {
-      this.playerBody.applyImpulse(new this.rapier.Vector3(impulse.x, impulse.y, impulse.z), true);
-    }
-  }
-
-  public getIsWasmReady(): boolean {
-    return this.isWasmReady;
   }
 }
